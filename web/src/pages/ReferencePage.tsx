@@ -17,9 +17,10 @@ import DocViewerModal from '../components/DocViewerModal'
 import { docFileOf, resolveRef } from '../lib/docref'
 
 // 平台知识内容（REQ-116 / REQ-161 v2）：构建期内联扫描 platform-knowledge/ 全目录，
-// 主题页发现仍是目录驱动（新增或迁移文档后重建即生效）；但页面组织不再照搬存放顺序——
-// L1 分组按 GROUP_ORDER 规划（导航栏模块及其顺序优先，平台级专题随后、设置殿后），
-// 组内「模块导读」置顶、专题按文档编号序（REQ-169 交付轮调整，2026-09-26）。
+// 主题页发现仍是目录驱动（新增或迁移文档后重建即生效）；但页面组织不照搬存放顺序——
+// L1 分组按 GROUP_ORDER 规划（导航栏模块及其顺序，平台总览置顶、设置殿后），
+// 个别专题跨目录挂载见 TOPIC_MOUNT（REQ-169 二轮，2026-09-26 主人指定）；
+// 组内主页置顶（模块导读/平台总览）、专题按文档编号序。
 // 每篇头部 frontmatter（module/topic/desc/req/docs/decisions/synced）为页面元信息与源指针约定，
 // 语义级变更（REQ 行/决策/口径）须同步更新命中的文档（AGENTS.md 纪律 7）。
 const KB_RAW = import.meta.glob('../../../platform-knowledge/**/*.md', {
@@ -45,8 +46,19 @@ const MODULES: { dir: string; label: string; icon: ReactNode }[] = [
 ]
 
 /** L1 分组顺序（规划态，非目录存放顺序）：平台总览置顶为入口 → 五业务模块按导航栏顺序 →
- *  平台级专题（产品设计 / DeepSeek Harness / 外部资源）→ 设置对应导航栏最右齿轮殿后 */
-const GROUP_ORDER = ['总览', '智能体', '项目', '本体', '知识库', '技能', '产品设计', 'DeepSeek-Harness', '外部资源', '设置']
+ *  设置对应导航栏最右齿轮殿后；跨目录挂载的专题随目标组出现，不单列 L1 */
+const GROUP_ORDER = ['总览', '智能体', '项目', '本体', '知识库', '技能', '设置']
+
+/** 跨目录挂载（REQ-169 二轮，主人指定）：键=主题 key（存放目录/文件），value=挂载的 L1 组 + 展示名。
+ *  仅改页面归属与标题；互引解析基准 base 仍按真实存放目录，保证文内相对链接不失效 */
+const TOPIC_MOUNT: Record<string, { group: string; label: string }> = {
+  '产品设计/17_产品_信息架构与界面设计': { group: '总览', label: '产品设计' },
+  'DeepSeek-Harness/DeepSeek-Harness': { group: '智能体', label: 'DeepSeek Harness' },
+  '外部资源/外部资源导航': { group: '本体', label: '本体学习外部资源导航' },
+}
+
+/** 各组主页文件（组内置顶；默认 `${dir}模块` 即「模块导读」，总览组为 平台总览） */
+const HOME_FILE: Record<string, string> = { 总览: '平台总览' }
 
 interface Topic {
   key: string
@@ -83,17 +95,34 @@ const TOPICS: Topic[] = (() => {
     const file = rel.slice(slash + 1).replace(/\.md$/, '')
     const mod = MODULES.find((m) => m.dir === dir)
     if (!mod) continue
-    out.push({ key: `${dir}/${file}`, file, title: topicTitle(dir, file), md: raw, base: `platform-knowledge/${dir}`, group: dir, groupLabel: mod.label, icon: mod.icon })
+    const key = `${dir}/${file}`
+    // 跨目录挂载（TOPIC_MOUNT）：归属组/展示名/图标随目标组，base 保持真实存放目录
+    const mount = TOPIC_MOUNT[key]
+    const effGroup = mount?.group ?? dir
+    const effMod = MODULES.find((m) => m.dir === effGroup) ?? mod
+    out.push({
+      key,
+      file,
+      title: mount?.label ?? topicTitle(dir, file),
+      md: raw,
+      base: `platform-knowledge/${dir}`,
+      group: effGroup,
+      groupLabel: effMod.label,
+      icon: effMod.icon,
+    })
   }
+  // 外部资源主题页（seeds 单源）按 TOPIC_MOUNT 挂载到目标组（二轮起挂本体组）
+  const extMount = TOPIC_MOUNT['外部资源/外部资源导航']
+  const extMod = MODULES.find((m) => m.dir === extMount?.group)
   out.push({
     key: '外部资源/外部资源导航',
     file: '外部资源导航',
-    title: '外部资源导航',
+    title: extMount?.label ?? '外部资源导航',
     md: EXTERNAL_RESOURCES_MD,
     base: 'seeds/learning',
-    group: '外部资源',
-    groupLabel: '外部资源',
-    icon: <LinkOutlined />,
+    group: extMount?.group ?? '外部资源',
+    groupLabel: extMod?.label ?? '外部资源',
+    icon: extMod?.icon ?? <LinkOutlined />,
   })
   return out
 })()
@@ -108,10 +137,10 @@ interface Frontmatter {
   synced?: string
 }
 
-/** 组内排序：模块导读置顶 → 有文档编号者按编号升序 → 无编号者按标题（zh）排在编号文档之后 */
+/** 组内排序：组主页置顶（模块导读/平台总览）→ 有文档编号者按编号升序 → 无编号者按标题（zh）排在编号文档之后 */
 function compareTopics(a: Topic, b: Topic): number {
-  const ga = a.title === '模块导读' ? 0 : 1
-  const gb = b.title === '模块导读' ? 0 : 1
+  const ga = isGroupHome(a) ? 0 : 1
+  const gb = isGroupHome(b) ? 0 : 1
   if (ga !== gb) return ga - gb
   const na = /^(\d+)_/.exec(a.file)?.[1]
   const nb = /^(\d+)_/.exec(b.file)?.[1]
@@ -119,6 +148,10 @@ function compareTopics(a: Topic, b: Topic): number {
   const vb = nb ? Number(nb) : Number.POSITIVE_INFINITY
   if (va !== vb) return va - vb
   return a.title.localeCompare(b.title, 'zh-Hans-CN')
+}
+
+function isGroupHome(t: Topic): boolean {
+  return t.title === '模块导读' || t.file === (HOME_FILE[t.group] ?? `${t.group}模块`)
 }
 
 /** 解析文章头部 `---` frontmatter（轻量 key: [a, b] 格式，无需引入 YAML 依赖） */
@@ -202,7 +235,10 @@ export default function ReferencePage() {
       if (arr) arr.push(t)
       else m.set(t.group, [t])
     }
-    return GROUP_ORDER.filter((g) => m.has(g)).map((g) => {
+    // 规划序在前；未来新增目录若未登记 GROUP_ORDER，按模块注册表序兜底追加（目录驱动不丢组）
+    const ordered = GROUP_ORDER.filter((g) => m.has(g))
+    const rest = MODULES.map((x) => x.dir).filter((d) => m.has(d) && !GROUP_ORDER.includes(d))
+    return [...ordered, ...rest].map((g) => {
       const mod = MODULES.find((x) => x.dir === g)
       const topics = (m.get(g) ?? []).sort(compareTopics)
       return { group: g, label: mod?.label ?? g, icon: mod?.icon ?? <LinkOutlined />, topics }
