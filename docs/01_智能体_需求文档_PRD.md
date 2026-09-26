@@ -1,6 +1,6 @@
 # eino-multiagent-lab · 智能体平台 需求文档（PRD）
 
-> 状态：Draft v0.51
+> 状态：Draft v0.52
 > 日期：2026-09-26
 > 负责人：董奎
 > 文档性质：**活文档**。每个迭代开始前更新「迭代记录」与「需求池」，已确认需求不要直接删除，改为在条目后标注 `（已变更/已移交，见 vX.X）`。
@@ -537,3 +537,4 @@
 | v0.49 | 2026-09-26 | **REQ-150 对比界面系统优化交付收尾（M19 阶段三，代码 f280135 2026-09-25 主人本地先行 + 本轮补齐验证/缺陷修复/文档回写）**：①选项承载迁移——共享输入区 chips 收起为摘要文案（对比模式不参与配置）、模型/库/方案/技能四徽标迁窗格头（技能新增覆盖项，覆盖态品牌高亮显值名/继承态浅色+Popover 内显继承来源值）；②窗格视觉系统化——窗格头（窗格名+Agent logo/名称+徽标组+采纳）、Splitter 分隔宽度可调、停止按钮 title 注明整组语义；③本轮补齐：窗格头状态徽标（待提问/生成中/完成/出错/已停止，脉冲动画）+ 顺修停止断流缺陷（abort 后 run.finished 收不到致流式游标永挂——stopFlag 标记+收尾兜底置终态，单路/对比两路同修）；④验证：go build/go test 全绿 + vite build + CDP 冒烟（徽标覆盖 flashx 生效/SC-10 双 Agent 同问对照/停止→已停止/Splitter 拖宽 580→660/刷新配置持久化）+ 截图 2 张存 smoke/req150/；02 v0.68/17 v0.20/20 v1.18/18 v1.30 同步 | 董奎 × 自动化执行者 |
 | v0.50 | 2026-09-26 | **M10 10b 交付回写领取（9b0d45c 代码 2026-09-25 先行，本轮补齐文档侧——AGENTS「当前状态」悬置项清账）**：REQ-122 §3.3 行「🔍 调研完成待领取」→ ✅ 10a/10b 已交付标注（96210e6/9b0d45c：docker 后端 SANDBOX_IMAGE 全链实测 + 沙箱生命周期可见化/资源限制参数化）；§3.7 行补交付注记（sandbox_memory/sandbox_cpus 迁移 020 + /api/agents/{id}/sandbox 状态与启停端点 + SidePanel 沙箱面板）。经核对 20 号 S2.8 的 10b 检查项已在 v1.12 随交付当日并入（无缺）；17 v0.21（LG-15 行去「M10 未激活」+ §4.3 实现注记）、02 v0.69（M10 行回写收口）同步 | 董奎 × 自动化执行者 |
 | v0.51 | 2026-09-26 | **REQ-172 立项即交付（主人提出：模型管理支持 anthropic 协议 + 二级配置界面优化）**：①协议新增 `anthropic`——连接协议从仅 openai_compat 扩为双通道，后端按协议建模（internal/modelproto 纯函数包 + chat 三处建模收口 `buildChatModel`；anthropic 走 eino-ext/components/model/claude v0.1.20，15 v2.13 登记；网关根地址归一自动拼 /v1/messages；温度钳 [0,1]；anthropic+embedding 组合拒绝）；测试连接/自动发现（REQ-43/48）增 anthropic 分支；②二级配置界面——ProviderModal/ModelModal/DiscoverPanel 抽取 `web/src/pages/settings/` 组件 + 分组化布局 + 协议感知动态表单 + 预设清单 +4 条 Anthropic 系。02 v0.76（§12 M29 行）/15 v2.13/20 v1.24（S6.6）/18 v1.37 同步 | 董奎 × 协作 Agent |
+| v0.52 | 2026-09-26 | **REQ-169 交付（主人四点体验反馈驱动收尾，平台知识文档互引阅读）**：①平台知识页侧栏菜单区自身滚动；②侧栏 L1 分组改规划序（平台总览置顶 → 五业务模块按导航栏顺序 → 产品设计/DeepSeek Harness/外部资源 → 设置殿后；组内「模块导读」置顶、专题按文档编号升序、展示标题去编号前缀——不再照搬目录存放顺序）；③右侧阅读抽屉默认关、点击互引才展开、可手动关闭；④互引链接点击全链修复——根因：DocViewerModal 误作 Splitter 直接子元素被 AntD Splitter 吞成空白面板（「右侧默认空白栏」与「01_PRD 链接点击无反应」共同根因），移出 Splitter；抽屉内 XMarkdown 补 openLinksInNewTab（默认渲染器对中文 href 做 encodeURI 致 docRead 按字面路径找不到）+ resolveRef 百分号编码防御解码（抽共享 web/src/lib/docref.ts）+ 抽屉内互引可续点（按当前文档目录解析，跨目录跳转实测 docs/03→platform-knowledge/智能体）+ 抽屉剥 frontmatter 头。20 v1.25（S1.4）/18 v1.39/17 v0.23 同步；截图 smoke/req169/ | 董奎 × 协作 Agent |

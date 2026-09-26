@@ -14,9 +14,12 @@ import {
 } from '@ant-design/icons'
 import XMarkdown from '@ant-design/x-markdown'
 import DocViewerModal from '../components/DocViewerModal'
+import { docFileOf, resolveRef } from '../lib/docref'
 
-// 平台知识内容（REQ-116 / REQ-161 v2）：构建期内联扫描 platform-knowledge/ 全目录——
-// 目录结构即页面结构（L1 模块子目录 / L2 主题页），新增或迁移文档后重建即生效。
+// 平台知识内容（REQ-116 / REQ-161 v2）：构建期内联扫描 platform-knowledge/ 全目录，
+// 主题页发现仍是目录驱动（新增或迁移文档后重建即生效）；但页面组织不再照搬存放顺序——
+// L1 分组按 GROUP_ORDER 规划（导航栏模块及其顺序优先，平台级专题随后、设置殿后），
+// 组内「模块导读」置顶、专题按文档编号序（REQ-169 交付轮调整，2026-09-26）。
 // 每篇头部 frontmatter（module/topic/desc/req/docs/decisions/synced）为页面元信息与源指针约定，
 // 语义级变更（REQ 行/决策/口径）须同步更新命中的文档（AGENTS.md 纪律 7）。
 const KB_RAW = import.meta.glob('../../../platform-knowledge/**/*.md', {
@@ -28,7 +31,7 @@ const KB_RAW = import.meta.glob('../../../platform-knowledge/**/*.md', {
 // 「外部资源」主题页（REQ-109/162）：内容单源仍在 seeds/learning/external-resources.md，构建期内联挂载
 import EXTERNAL_RESOURCES_MD from '../../../seeds/learning/external-resources.md?raw'
 
-/** 模块注册表：目录名 → 页面显示名 + 图标；顺序即页面 L1 顺序（platform-knowledge/README.md 同源维护） */
+/** 模块注册表：目录名 → 页面显示名 + 图标（platform-knowledge/README.md 同源维护） */
 const MODULES: { dir: string; label: string; icon: ReactNode }[] = [
   { dir: '总览', label: '平台总览', icon: <CompassOutlined /> },
   { dir: '智能体', label: '智能体', icon: <RobotOutlined /> },
@@ -41,8 +44,15 @@ const MODULES: { dir: string; label: string; icon: ReactNode }[] = [
   { dir: '产品设计', label: '产品设计', icon: <HighlightOutlined /> },
 ]
 
+/** L1 分组顺序（规划态，非目录存放顺序）：平台总览置顶为入口 → 五业务模块按导航栏顺序 →
+ *  平台级专题（产品设计 / DeepSeek Harness / 外部资源）→ 设置对应导航栏最右齿轮殿后 */
+const GROUP_ORDER = ['总览', '智能体', '项目', '本体', '知识库', '技能', '产品设计', 'DeepSeek-Harness', '外部资源', '设置']
+
 interface Topic {
   key: string
+  /** 文件名（不含 .md，保留编号前缀，供组内排序） */
+  file: string
+  /** 展示标题：去编号前缀/模块同名前缀，「X模块」归一为「模块导读」，下划线转间隔点 */
   title: string
   md: string
   /** 主题页所在仓库目录——正文相对引用的解析基准（REQ-161 补充：文档互引用相对路径） */
@@ -50,6 +60,14 @@ interface Topic {
   group: string
   groupLabel: string
   icon: ReactNode
+}
+
+/** 文件名 → 展示标题（通用规则，新文档落目录即自动获得可读标题） */
+function topicTitle(dir: string, file: string): string {
+  if (file === `${dir}模块`) return '模块导读'
+  let t = file.replace(/^\d+_/, '')
+  if (t.startsWith(`${dir}_`)) t = t.slice(dir.length + 1)
+  return t.replace(/_/g, '·')
 }
 
 const TOPICS: Topic[] = (() => {
@@ -65,10 +83,11 @@ const TOPICS: Topic[] = (() => {
     const file = rel.slice(slash + 1).replace(/\.md$/, '')
     const mod = MODULES.find((m) => m.dir === dir)
     if (!mod) continue
-    out.push({ key: `${dir}/${file}`, title: file, md: raw, base: `platform-knowledge/${dir}`, group: dir, groupLabel: mod.label, icon: mod.icon })
+    out.push({ key: `${dir}/${file}`, file, title: topicTitle(dir, file), md: raw, base: `platform-knowledge/${dir}`, group: dir, groupLabel: mod.label, icon: mod.icon })
   }
   out.push({
     key: '外部资源/外部资源导航',
+    file: '外部资源导航',
     title: '外部资源导航',
     md: EXTERNAL_RESOURCES_MD,
     base: 'seeds/learning',
@@ -89,48 +108,17 @@ interface Frontmatter {
   synced?: string
 }
 
-const DOC_FILE_BY_NO: Record<string, string> = {
-  '01': 'docs/01_智能体_需求文档_PRD.md',
-  '02': 'docs/02_智能体_技术方案设计.md',
-  '03': 'docs/03_本体_需求文档.md',
-  '04': 'docs/04_本体_方案设计.md',
-  '11': 'docs/11_知识库_需求文档.md',
-  '12': 'docs/12_知识库_方案设计.md',
-  '14': 'docs/14_本体_前端改造方案.md',
-  '16': 'docs/16_部署与运行.md',
-  '17': 'platform-knowledge/产品设计/17_产品_信息架构与界面设计.md',
-  '18': 'docs/18_REQ编号注册表.md',
-  '19': 'platform-knowledge/本体/19_本体_semantica集成方案.md',
-  '20': 'docs/20_回归冒烟清单.md',
-  '21': 'platform-knowledge/知识库/21_知识库能力增强调研.md',
-  '22': 'platform-knowledge/智能体/22_多类型智能体方案研究.md',
-  '23': 'platform-knowledge/本体/23_本体_开源实现方案借鉴研究.md',
-  '24': 'platform-knowledge/本体/24_本体_本地工程化落地方案调研.md',
-  '25': 'platform-knowledge/知识库/25_Agent知识库与知识图谱构建接入方案.md',
-}
-/** 相对引用解析（REQ-161 补充要求：文档互引用相对路径）——按主题页所在仓库目录解析，返回仓库相对 .md 路径或 null */
-export function resolveRef(href: string, base: string): string | null {
-  const h = href.trim()
-  if (!h || h.startsWith('http://') || h.startsWith('https://') || h.startsWith('#') || h.startsWith('mailto:')) return null
-  if (h.startsWith('/')) return null
-  const joined = /^(platform-knowledge|docs|research|seeds)\//.test(h) ? h : `${base}/${h}`
-  const parts: string[] = []
-  for (const seg of joined.split('/')) {
-    if (seg === '' || seg === '.') continue
-    if (seg === '..') parts.pop()
-    else parts.push(seg)
-  }
-  const out = parts.join('/')
-  return out.endsWith('.md') ? out : null
-}
-
-export function docFileOf(ptr: string): string | null {
-  const s = ptr.trim()
-  // 完整路径直传（docs/ platform-knowledge/ research/ 下的 .md）
-  if (s.endsWith('.md') && (s.startsWith('docs/') || s.startsWith('research/') || s.startsWith('platform-knowledge/'))) return s
-  // 编号指针（如 "02" / "02 §6.4" / "17 §2.2"）：取前两位编号映射
-  const no = s.slice(0, 2)
-  return DOC_FILE_BY_NO[no] ?? null
+/** 组内排序：模块导读置顶 → 有文档编号者按编号升序 → 无编号者按标题（zh）排在编号文档之后 */
+function compareTopics(a: Topic, b: Topic): number {
+  const ga = a.title === '模块导读' ? 0 : 1
+  const gb = b.title === '模块导读' ? 0 : 1
+  if (ga !== gb) return ga - gb
+  const na = /^(\d+)_/.exec(a.file)?.[1]
+  const nb = /^(\d+)_/.exec(b.file)?.[1]
+  const va = na ? Number(na) : Number.POSITIVE_INFINITY
+  const vb = nb ? Number(nb) : Number.POSITIVE_INFINITY
+  if (va !== vb) return va - vb
+  return a.title.localeCompare(b.title, 'zh-Hans-CN')
 }
 
 /** 解析文章头部 `---` frontmatter（轻量 key: [a, b] 格式，无需引入 YAML 依赖） */
@@ -204,7 +192,7 @@ function SourceMap({ meta, onOpenDoc }: { meta: Frontmatter; onOpenDoc: (path: s
 
 export default function ReferencePage() {
   const [active, setActive] = useState('总览/平台总览')
-  const [viewDoc, setViewDoc] = useState<string | null>(null) // REQ-140/161：点击引用相对路径 → 右侧 Drawer 阅读
+  const [viewDoc, setViewDoc] = useState<string | null>(null) // REQ-169：点击互引相对路径 → 右侧 Drawer 阅读，默认关闭
   const topic = TOPICS.find((t) => t.key === active) ?? TOPICS[0]
   const { meta, body } = useMemo(() => parseFrontmatter(topic.md), [topic])
   const groups = useMemo(() => {
@@ -214,12 +202,13 @@ export default function ReferencePage() {
       if (arr) arr.push(t)
       else m.set(t.group, [t])
     }
-    return [...m.entries()].map(([g, ts]) => {
+    return GROUP_ORDER.filter((g) => m.has(g)).map((g) => {
       const mod = MODULES.find((x) => x.dir === g)
-      return { group: g, label: mod?.label ?? g, icon: mod?.icon ?? <LinkOutlined />, topics: ts }
+      const topics = (m.get(g) ?? []).sort(compareTopics)
+      return { group: g, label: mod?.label ?? g, icon: mod?.icon ?? <LinkOutlined />, topics }
     })
   }, [])
-  /** 正文相对引用点击（REQ-161 补充要求）：拦截指向仓库内 .md 的相对路径 → 右侧 Drawer 阅读；http/锚点走默认 */
+  /** 正文相对引用点击（REQ-169）：拦截指向仓库内 .md 的相对路径 → 右侧 Drawer 阅读；http/锚点走默认 */
   const onBodyClick = (e: MouseEvent) => {
     const a = (e.target as HTMLElement).closest?.('a')
     if (!a) return
@@ -229,7 +218,8 @@ export default function ReferencePage() {
     setViewDoc(resolved)
   }
   return (
-    <Splitter className="main sidebar-splitter">
+    <>
+      <Splitter className="main sidebar-splitter">
       <Splitter.Panel
         defaultSize={Number(localStorage.getItem('eino.ref.width')) || 240}
         min={180}
@@ -240,23 +230,29 @@ export default function ReferencePage() {
           <div className="side-head">
             <span className="side-title">平台知识</span>
           </div>
-          <Menu
-            mode="inline"
-            selectedKeys={[active]}
-            defaultOpenKeys={groups.map((g) => g.group)}
-            onClick={({ key }) => setActive(String(key))}
-            style={{ padding: '0 10px', background: 'transparent' }}
-            items={groups.map((g) => ({
-              key: g.group,
-              icon: g.icon,
-              label: g.label,
-              children: g.topics.map((t) => ({ key: t.key, label: t.title })),
-            }))}
-          />
+          <div className="ref-menu">
+            <Menu
+              mode="inline"
+              selectedKeys={[active]}
+              defaultOpenKeys={groups.filter((g) => g.topics.length > 1).map((g) => g.group)}
+              onClick={({ key }) => setActive(String(key))}
+              style={{ background: 'transparent' }}
+              items={groups.map((g) =>
+                g.topics.length === 1
+                  ? { key: g.topics[0].key, icon: g.icon, label: g.label }
+                  : {
+                      key: g.group,
+                      icon: g.icon,
+                      label: g.label,
+                      children: g.topics.map((t) => ({ key: t.key, label: t.title })),
+                    },
+              )}
+            />
+          </div>
           <div className="settings-note">
-            目录即页面结构（
+            内容收录目录驱动（
             <Typography.Text code style={{ fontSize: 11 }}>platform-knowledge/</Typography.Text>
-            ）；L1 模块 / L2 主题页，新增或修改文档后重建即生效。
+            ）；页面组织按导航模块规划，新增文档落入模块目录后重建即生效。
           </div>
         </aside>
       </Splitter.Panel>
@@ -282,7 +278,10 @@ export default function ReferencePage() {
           </div>
         </div>
       </Splitter.Panel>
-      <DocViewerModal path={viewDoc} open={!!viewDoc} onClose={() => setViewDoc(null)} />
     </Splitter>
+    {/* 抽屉必须挂在 Splitter 之外：AntD Splitter 只认 Splitter.Panel 子元素，
+        混入其他组件会被吞成一个空白面板（REQ-169「右侧空白栏/链接无反应」的根因） */}
+    <DocViewerModal path={viewDoc} open={!!viewDoc} onClose={() => setViewDoc(null)} onNavigate={setViewDoc} />
+    </>
   )
 }
