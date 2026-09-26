@@ -32,6 +32,7 @@ export default function NameModal({
   return (
     <Modal
       open={open}
+      centered
       title={title}
       okText={okText}
       cancelText="取消"

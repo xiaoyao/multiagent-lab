@@ -47,6 +47,8 @@
 
 ## 当前状态（2026-09-26，由协作 Agent 维护）
 
+- **REQ-173 全站交互体验统一 P1 已交付（2026-09-27，主人指令"检查优化整个web页面交互效果，重点弹窗/配置页/子页面"）**：全局审计（18 Modal 10 种宽度/5 默认 footer/52 Select 仅 5 处可搜/防双击基本到位）→ P1 批次——①弹窗规范统一：centered 补齐 5 处（NameModal/graph-editor×3/PipelinePane）+ PipelinePane confirmLoading 防双击 + ModelModal 宽度对齐 620（宽度口径落档：小输入 440/标准 560~620/分组大表单 680/对照预览 900）；②动态实体下拉 showSearch 10 处（AgentModal 模型+工具/AgentSidePanel 模型/KnowledgePage 抽取连接/RuntimePage 本体多选/CompanionPane 会话/SkillsPage 工具/ProviderModal 预设/graph-editor 概念×2——REQ-153 后百级清单可搜可选）；**坑：AntD6 Modal centered 类名在 wrap 上（.ant-modal-wrap.ant-modal-centered）非 .ant-modal**。零新依赖（全 AntD 6 现成能力）；P2 池登记（Descriptions 化/LoadErrorAlert 铺开/pro-components 评估）。01 v0.54/18 v1.40/14 v0.24；冒烟 6 断言全过截图 smoke/req173/。
+
 - **三维视图初始化失败已修复（2026-09-26，主人报障）**：根因=Graph3D 的 `/vendor/3d-force-graph.min.js` UMD 被 .gitignore 覆盖却无补给脚本（macOS 正身手工放置，WSL/新克隆缺失），SPA fallback 把 index.html 按 200 回给 script（parse 错误不触发 onerror）→ `window.ForceGraph3D` 未定义即报错。修复：①`web/scripts/prepare-vendor.mjs` 自 node_modules 的 3d-force-graph npm 包复制 UMD，挂 `npm run dev`/`build` 前自动执行（克隆即自愈）；②Graph3D 预挂 `window.THREE = THREE`（import three——UMD 按 `window.THREE ? : 内置` 取 three，挂上后自绘球体/八面体与渲染器同实例，修掉此前静默回退默认形状）+ 分发缺失报错附指引 + 删调试 log；③重建 dist 冒烟 8 断言全过（医学常识 102 概念/170 实例三维渲染、2D↔3D 往返），截图 smoke/viz3d-fix/。14 v0.23/20 v1.25 S4.5 注记。
 
 - **REQ-169 二轮挂载调整已交付（2026-09-26，主人指定）**：平台知识页 L1 由十组收敛为七组（平台总览/智能体/项目/本体/知识库/技能/设置，取代一轮的「产品设计/DeepSeek Harness/外部资源」独立组序）——产品设计（17 号）挂平台总览二级、DeepSeek Harness 挂智能体组、本体学习外部资源导航（外部资源主题页，seeds 单源）挂本体组；实现为 `TOPIC_MOUNT` 显式映射（展示名随挂载目标，**互引解析 base 仍按真实存放目录**不受挂载影响）+ 组内主页置顶规则扩展（模块导读/平台总览）+ 未登记新目录按模块注册表序兜底追加；headless Chrome 结构断言+挂载页渲染实测过，截图 smoke/req169/ 06/07；01 v0.53/17 v0.24/20 v1.26（S1.4）/README 口径同步（18 无需变更——REQ-169 行无结构枚举）。

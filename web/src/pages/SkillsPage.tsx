@@ -384,6 +384,8 @@ function SkillModal({
           <Select
             mode="multiple"
             allowClear
+            showSearch
+            optionFilterProp="label"
             placeholder="选择该技能可用的工具"
             options={tools.map((t) => ({ value: t.id, label: `${t.name}${t.source ? ` · ${t.source}` : ''}` }))}
           />

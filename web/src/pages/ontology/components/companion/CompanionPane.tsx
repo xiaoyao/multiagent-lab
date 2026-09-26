@@ -189,6 +189,8 @@ export default function CompanionPane() {
         <span className="hit-spacer" />
         <Select
           style={{ width: 340 }}
+          showSearch
+          optionFilterProp="label"
           value={convId}
           loading={convsLoading}
           onChange={setConvId}

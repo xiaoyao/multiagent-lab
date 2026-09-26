@@ -103,7 +103,7 @@ export function ModelModal({ conn, groups, conns, initialProvider, onClose, onSa
       centered
       title={editConn ? `编辑模型 · ${editConn.model_name}` : '添加模型'}
       onCancel={onClose}
-      width={600}
+      width={620}
       footer={
         <Space>
           <Button onClick={onClose}>取消</Button>

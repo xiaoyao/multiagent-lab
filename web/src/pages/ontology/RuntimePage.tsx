@@ -562,6 +562,8 @@ function ProfileEdit({
             <span className="cfg-label">加载的本体集合（多选，来自构建平面仓库）</span>
             <Select
               mode="multiple"
+              showSearch
+              optionFilterProp="label"
               style={{ width: '100%' }}
               placeholder="选择本体（可多选）"
               value={selectedIds}

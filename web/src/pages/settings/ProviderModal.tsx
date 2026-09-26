@@ -170,6 +170,8 @@ export function ProviderModal({ group, conns, onClose, onSaved }: {
             }
           >
             <Select
+              showSearch
+              optionFilterProp="label"
               placeholder="选择厂商预设（Anthropic / DeepSeek / 智谱 GLM / Kimi / 百炼 / 千帆 / 硅基流动 / MiniMax / 星火…）"
               allowClear
               value={presetKey}

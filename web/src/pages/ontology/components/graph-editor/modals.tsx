@@ -25,7 +25,7 @@ export function AddConceptModal({
   onCancel: () => void
 }) {
   return (
-    <Modal title="添加概念" open={open} okText="添加" cancelText="取消" onOk={onOk} onCancel={onCancel} destroyOnHidden>
+    <Modal title="添加概念" open={open} centered okText="添加" cancelText="取消" onOk={onOk} onCancel={onCancel} destroyOnHidden>
       <Form form={form} layout="vertical" initialValues={{ parents: [] }}>
         <Form.Item name="name" label="名称（唯一标识）" rules={[{ required: true, message: '请输入概念名' }]}>
           <Input placeholder="如 Paper" />
@@ -37,7 +37,7 @@ export function AddConceptModal({
           <Input.TextArea rows={2} placeholder="一句话说明该概念是什么" />
         </Form.Item>
         <Form.Item name="parents" label="父概念（可选，多选）">
-          <Select mode="multiple" allowClear placeholder="选择已有概念" options={draft.concepts.map((c) => ({ value: c.name, label: c.label || c.name }))} />
+          <Select mode="multiple" allowClear showSearch optionFilterProp="label" placeholder="选择已有概念" options={draft.concepts.map((c) => ({ value: c.name, label: c.label || c.name }))} />
         </Form.Item>
       </Form>
     </Modal>
@@ -70,6 +70,7 @@ export function ConnectModal({
         )
       }
       open={!!connDraft}
+      centered
       okText="创建"
       cancelText="取消"
       onOk={onOk}
@@ -132,13 +133,13 @@ export function AddInstanceModal({
   onCancel: () => void
 }) {
   return (
-    <Modal title="添加实例" open={open} okText="添加" cancelText="取消" onOk={onOk} onCancel={onCancel} destroyOnHidden>
+    <Modal title="添加实例" open={open} centered okText="添加" cancelText="取消" onOk={onOk} onCancel={onCancel} destroyOnHidden>
       <Form form={form} layout="vertical">
         <Form.Item name="name" label="实例名（唯一标识）" rules={[{ required: true, message: '请输入实例名' }]}>
           <Input placeholder="如 《知识图谱》" />
         </Form.Item>
         <Form.Item name="concept" label="所属概念" rules={[{ required: true, message: '请选择所属概念' }]}>
-          <Select placeholder="选择概念" options={draft.concepts.map((c) => ({ value: c.name, label: c.label || c.name }))} />
+          <Select showSearch optionFilterProp="label" placeholder="选择概念" options={draft.concepts.map((c) => ({ value: c.name, label: c.label || c.name }))} />
         </Form.Item>
         <Form.Item
           name="attributes"

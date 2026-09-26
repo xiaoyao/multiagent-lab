@@ -280,7 +280,7 @@ function AgentConfigForm({ agent, onChanged }: { agent: Agent; onChanged?: () =>
                       )
                     }
                   >
-                    <Select allowClear placeholder="跟随全局默认" options={conns.map((c) => ({ value: c.id, label: connLabel(c) }))} />
+                    <Select allowClear showSearch optionFilterProp="label" placeholder="跟随全局默认" options={conns.map((c) => ({ value: c.id, label: connLabel(c) }))} />
                   </Form.Item>
                   {sec('采样参数')}
                   <Form.Item name="temperature" label="温度（0~2，留空默认）">

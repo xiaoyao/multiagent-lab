@@ -481,6 +481,8 @@ export default function KnowledgePage() {
                       KG 抽取配置（REQ-129①）：抽取模型与提示词按库覆写；留空 = 跟随全局默认
                     </Typography.Text>
                     <Select
+                      showSearch
+                      optionFilterProp="label"
                       value={kgConnID || undefined}
                       onChange={(v) => setKgConnID(v || '')}
                       allowClear

@@ -158,7 +158,7 @@ export default function AgentModal({
             )
           }
         >
-          <Select allowClear placeholder="跟随全局默认" options={conns.map((c) => ({ value: c.id, label: connLabel(c) }))} />
+          <Select allowClear showSearch optionFilterProp="label" placeholder="跟随全局默认" options={conns.map((c) => ({ value: c.id, label: connLabel(c) }))} />
         </Form.Item>
 
         <Collapse
@@ -193,6 +193,8 @@ export default function AgentModal({
             mode="multiple"
             allowClear
             virtual={false}
+            showSearch
+            optionFilterProp="label"
             placeholder={toolsErr ? '工具注册表暂不可用' : '选择可用工具'}
             options={tools.map((t) => ({ value: t.id, label: t.name, title: t.description, source: t.source }))}
             notFoundContent={toolsErr ? '工具注册表暂不可用' : '暂无工具'}

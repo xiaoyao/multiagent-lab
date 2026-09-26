@@ -328,9 +328,12 @@ export default function PipelinePane() {
       <Modal
         title="新建工具链配置"
         open={createOpen}
+        centered
         onOk={createPipeline}
         onCancel={() => setCreateOpen(false)}
         okText="创建"
+        cancelText="取消"
+        confirmLoading={busy}
         okButtonProps={{ disabled: !newName.trim() }}
       >
         <Input
