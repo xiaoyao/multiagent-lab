@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -652,23 +651,10 @@ func (a *Assembler) buildModel(ctx context.Context, ag *store.Agent) (model.Base
 		}
 	}
 
-	cfg := &openai.ChatModelConfig{
-		APIKey:  apiKey,
-		BaseURL: rec.Conn.BaseURL,
-		Model:   rec.Conn.ModelName,
-	}
-	if ag.Temperature != nil {
-		t := float32(*ag.Temperature)
-		cfg.Temperature = &t
-	}
-	if ag.MaxTokens != nil {
-		mt := *ag.MaxTokens
-		cfg.MaxTokens = &mt
-	}
-	var cm model.BaseChatModel
-	cm, err = openai.NewChatModel(ctx, cfg)
+	// REQ-172：按连接协议构造（openai_compat → OpenAI 兼容通道；anthropic → Messages API 通道）
+	cm, err := buildChatModel(ctx, rec.Conn, apiKey, ag.Temperature, ag.MaxTokens)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("create chat model: %w", err)
+		return nil, "", "", err
 	}
 	// REQ-117/M17：按观测级别包装（level 0 原样返回），每次 Generate/Stream 采集 model.step
 	cm = wrapDebug(cm, ag.Name, debugFrom(ctx))

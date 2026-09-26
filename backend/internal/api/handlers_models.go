@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/modelproto"
 	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/secrets"
 	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/store"
 )
@@ -28,6 +29,19 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, conns)
 }
 
+// validateConnProtocol 连接协议校验（REQ-172）：
+//   - 协议白名单（空 = 默认 openai_compat；支持 openai_compat / anthropic）；
+//   - anthropic 仅 chat（Anthropic 无官方向量接口，embedding 组合拒绝）。
+func validateConnProtocol(c *store.ModelConnection) string {
+	if !modelproto.Known(c.Protocol) {
+		return fmt.Sprintf("不支持的协议 %q（支持 openai_compat / anthropic）", c.Protocol)
+	}
+	if modelproto.IsAnthropic(c.Protocol) && c.ConnType == "embedding" {
+		return "anthropic 协议仅支持对话（chat）连接——Anthropic 无官方向量接口"
+	}
+	return ""
+}
+
 func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 	var c store.ModelConnection
 	if err := decodeJSON(r, &c); err != nil {
@@ -40,6 +54,10 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider_group_id 不存在: " + c.ProviderGroupID})
 			return
 		}
+	}
+	if msg := validateConnProtocol(&c); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
 	}
 	enc, err := s.resolveConnKey(&c)
 	if err != nil {
@@ -147,6 +165,10 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if msg := validateConnProtocol(&c); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
+	}
 	enc, err := s.resolveConnKey(&c)
 	if err != nil {
 		writeErr(w, err)
@@ -203,6 +225,7 @@ func (s *Server) setDefaultConnection(w http.ResponseWriter, r *http.Request) {
 type ConnTestInput struct {
 	ID       string `json:"id,omitempty"`
 	ConnType string `json:"conn_type,omitempty"`
+	Protocol string `json:"protocol,omitempty"` // REQ-172：anthropic 走 Messages API 探测
 	BaseURL  string `json:"base_url,omitempty"`
 	Model    string `json:"model_name,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
@@ -228,6 +251,7 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		in.ConnType = rec.Conn.ConnType
+		in.Protocol = rec.Conn.Protocol
 		in.BaseURL = rec.Conn.BaseURL
 		in.Model = rec.Conn.ModelName
 		in.APIKey = key
@@ -236,14 +260,20 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "base_url 与 model_name 必填"})
 		return
 	}
+	if in.ConnType == "embedding" && modelproto.IsAnthropic(in.Protocol) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "anthropic 协议仅支持对话（chat）连接"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
 	start := time.Now()
 	var errMsg string
-	switch in.ConnType {
-	case "embedding":
+	switch {
+	case in.ConnType == "embedding":
 		errMsg = probeEmbedding(ctx, in.BaseURL, in.Model, in.APIKey)
+	case modelproto.IsAnthropic(in.Protocol):
+		errMsg = probeAnthropicChat(ctx, in.BaseURL, in.Model, in.APIKey)
 	default:
 		errMsg = probeChat(ctx, in.BaseURL, in.Model, in.APIKey)
 	}
@@ -271,18 +301,33 @@ func (s *Server) listConnectionModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(rec.Conn.BaseURL, "/models"), nil)
+	// REQ-172：anthropic 连接走 /v1/models（x-api-key 头），其余走 OpenAI 兼容 GET {base_url}/models
+	var models []string
+	if modelproto.IsAnthropic(rec.Conn.Protocol) {
+		models, err = listAnthropicModels(ctx, rec.Conn.BaseURL, key)
+	} else {
+		models, err = listOpenAICompatModels(ctx, rec.Conn.BaseURL, key)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
+	}
+	sort.Strings(models)
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
+// listOpenAICompatModels OpenAI 兼容模型发现：GET {base_url}/models，Bearer 鉴权。
+func listOpenAICompatModels(ctx context.Context, baseURL, key string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(baseURL, "/models"), nil)
+	if err != nil {
+		return nil, err
 	}
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -295,18 +340,15 @@ func (s *Server) listConnectionModels(w http.ResponseWriter, r *http.Request) {
 		} `json:"error,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("HTTP %d, bad response: %v", resp.StatusCode, err)})
-		return
+		return nil, fmt.Errorf("HTTP %d, bad response: %v", resp.StatusCode, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
 		if out.Error != nil {
 			msg += ": " + out.Error.Message
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": msg})
-		return
+		return nil, fmt.Errorf("%s", msg)
 	}
-
 	seen := map[string]bool{}
 	models := []string{}
 	for _, m := range out.Data {
@@ -316,8 +358,52 @@ func (s *Server) listConnectionModels(w http.ResponseWriter, r *http.Request) {
 		seen[m.ID] = true
 		models = append(models, m.ID)
 	}
-	sort.Strings(models)
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	return models, nil
+}
+
+// listAnthropicModels Anthropic 模型发现（REQ-172）：GET {root}/v1/models，x-api-key + anthropic-version
+// 鉴权；响应同为 data[].id 形态。兼容网关可能未实现该端点——失败按 502 透出，前端降级手动添加。
+func listAnthropicModels(ctx context.Context, baseURL, key string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelproto.ModelsURL(baseURL), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", modelproto.APIVersion())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("HTTP %d, bad response: %v", resp.StatusCode, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if out.Error != nil {
+			msg += ": " + out.Error.Message
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	seen := map[string]bool{}
+	models := []string{}
+	for _, m := range out.Data {
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		models = append(models, m.ID)
+	}
+	return models, nil
 }
 
 // probeChat 用最小请求测 chat 连通（回复长度限制 8 token 级别）。
@@ -377,6 +463,49 @@ func simpleChatCompletion(ctx context.Context, baseURL, model, key, user string)
 		return "", fmt.Errorf("empty choices")
 	}
 	return out.Choices[0].Message.Content, nil
+}
+
+// probeAnthropicChat Anthropic Messages 探测（REQ-172）：POST {root}/v1/messages，
+// x-api-key + anthropic-version 头，max_tokens 16（该 API 必填）。
+func probeAnthropicChat(ctx context.Context, baseURL, modelName, key string) string {
+	body := map[string]any{
+		"model":      modelName,
+		"max_tokens": 16,
+		"messages":   []map[string]string{{"role": "user", "content": "ping，请回复 ok"}},
+	}
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, modelproto.MessagesURL(baseURL), bytes.NewReader(b))
+	if err != nil {
+		return err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", modelproto.APIVersion())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err.Error()
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Sprintf("HTTP %d, bad response: %v", resp.StatusCode, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if out.Error != nil {
+			msg += ": " + out.Error.Message
+		}
+		return msg
+	}
+	return ""
 }
 
 // probeEmbedding 测 embeddings 连通。

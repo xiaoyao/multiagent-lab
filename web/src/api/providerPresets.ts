@@ -3,10 +3,14 @@
  * 需求说明允许「前端静态 / 后端种子」二选一实现——取前端静态：清单纯数据驱动，
  * 增删厂商只改本数组，不动交互代码（REQ-77「候选清单开放性」同思路）。
  *
- * 每条预填：协议（openai_compat）+ Base URL + 建议首个模型名（REQ-106 自动填充，
+ * 每条预填：协议 + Base URL + 建议首个模型名（REQ-106 自动填充，
  * 用户仅需补 API Key；Key 归属提供商，模型可经 REQ-48 自动发现批量拉取）。
+ * REQ-172：新增 protocol 字段与 Anthropic 系预设——Anthropic 官方及 DeepSeek/智谱 GLM/Kimi
+ * 的 Anthropic 兼容端点（Base URL 为网关根地址，平台自动拼 /v1/messages）。
  * 接入点与模型名为常见文档口径，厂商侧随版本演进可能调整——预设仅是快捷起点，表单内可改。
  */
+
+export type ProviderProtocol = 'openai_compat' | 'anthropic'
 
 export interface ProviderPreset {
   key: string
@@ -17,6 +21,8 @@ export interface ProviderPreset {
   defaultModel: string
   /** 该厂商主打连接类型（个别厂商两条预设分别给 chat / embedding） */
   connType: 'chat' | 'embedding'
+  /** 接入协议；缺省 openai_compat（REQ-172 起可选 anthropic） */
+  protocol?: ProviderProtocol
   /** 控制台地址（提示去申请 API Key） */
   console?: string
 }
@@ -29,6 +35,42 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     defaultModel: 'deepseek-chat',
     connType: 'chat',
     console: 'https://platform.deepseek.com',
+  },
+  {
+    key: 'anthropic',
+    name: 'Anthropic 官方',
+    baseUrl: 'https://api.anthropic.com',
+    defaultModel: 'claude-sonnet-4-5',
+    connType: 'chat',
+    protocol: 'anthropic',
+    console: 'https://console.anthropic.com/settings/keys',
+  },
+  {
+    key: 'deepseek-anthropic',
+    name: 'DeepSeek（Anthropic 兼容）',
+    baseUrl: 'https://api.deepseek.com/anthropic',
+    defaultModel: 'deepseek-chat',
+    connType: 'chat',
+    protocol: 'anthropic',
+    console: 'https://platform.deepseek.com',
+  },
+  {
+    key: 'zhipu-anthropic',
+    name: '智谱 GLM（Anthropic 兼容）',
+    baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+    defaultModel: 'glm-4.6',
+    connType: 'chat',
+    protocol: 'anthropic',
+    console: 'https://open.bigmodel.cn',
+  },
+  {
+    key: 'kimi-anthropic',
+    name: '月之暗面 Kimi（Anthropic 兼容）',
+    baseUrl: 'https://api.moonshot.cn/anthropic',
+    defaultModel: 'kimi-k2-turbo-preview',
+    connType: 'chat',
+    protocol: 'anthropic',
+    console: 'https://platform.moonshot.cn',
   },
   {
     key: 'bailian',

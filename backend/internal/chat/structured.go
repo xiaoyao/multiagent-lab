@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/secrets"
@@ -63,13 +62,10 @@ func GenerateStructured(ctx context.Context, st *store.Store, box *secrets.Box, 
 			return nil, fmt.Errorf("decrypt api key: %w", err)
 		}
 	}
-	cm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey:  apiKey,
-		BaseURL: rec.Conn.BaseURL,
-		Model:   rec.Conn.ModelName,
-	})
+	// REQ-172：按连接协议构造（anthropic 连接走 Messages API 通道）
+	cm, err := buildChatModel(ctx, rec.Conn, apiKey, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create chat model: %w", err)
+		return nil, err
 	}
 
 	// 2) 结构化生成：schema 注入 system，要求仅输出 JSON
@@ -165,14 +161,10 @@ func GenerateText(ctx context.Context, st *store.Store, box *secrets.Box, connID
 			return "", fmt.Errorf("decrypt api key: %w", err)
 		}
 	}
-	cfg := &openai.ChatModelConfig{APIKey: apiKey, BaseURL: rec.Conn.BaseURL, Model: rec.Conn.ModelName}
-	if temperature != nil {
-		t := float32(*temperature)
-		cfg.Temperature = &t
-	}
-	cm, err := openai.NewChatModel(ctx, cfg)
+	// REQ-172：按连接协议构造（anthropic 连接走 Messages API 通道）
+	cm, err := buildChatModel(ctx, rec.Conn, apiKey, temperature, nil)
 	if err != nil {
-		return "", fmt.Errorf("create chat model: %w", err)
+		return "", err
 	}
 	msg, err := cm.Generate(ctx, []*schema.Message{schema.SystemMessage(system), schema.UserMessage(user)})
 	if err != nil {

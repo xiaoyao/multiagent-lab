@@ -118,7 +118,7 @@ type ModelConnection struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	ConnType   string `json:"conn_type"` // chat | embedding
-	Protocol   string `json:"protocol"`  // openai_compat
+	Protocol   string `json:"protocol"`  // openai_compat | anthropic（REQ-172）
 	BaseURL    string `json:"base_url"`
 	ModelName  string `json:"model_name"`
 	APIKeyHint string `json:"api_key_hint"` // 掩码，如 sk-****ab12
