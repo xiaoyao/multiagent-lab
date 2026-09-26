@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Empty, Input, Select, Space, Tag, Typography } from 'antd'
-// M21/VIZ-1：经本地 UMD 分发注入（web/public/vendor/，随镜像分发）——Vite ESM 打包链下
+import * as THREE from 'three'
+// M21/VIZ-1：经本地 UMD 分发注入（web/public/vendor/，npm run dev/build 自动从
+// node_modules 复制，见 web/scripts/prepare-vendor.mjs）——Vite ESM 打包链下
 // Kapsule 工厂与 React 18 StrictMode 组合曾出现静默不注入；UMD + window 全局实测稳定
 import type { Spec } from '../../../api/types'
 
@@ -129,8 +131,11 @@ export default function Graph3D({ spec }: { spec: Spec | null }) {
       return
     }
     try {
+      // 先挂全局 THREE 再加载 UMD：3d-force-graph 的 UMD 内部按 `window.THREE ? window.THREE : 内置`
+      // 取 three——挂上后渲染器与自绘几何（球体/八面体）用同一份 three 实例
+      ;(window as any).THREE = THREE
       await loadScript('/vendor/3d-force-graph.min.js')
-      if (!window.ForceGraph3D) throw new Error('3d-force-graph 分发加载失败（/vendor/3d-force-graph.min.js）')
+      if (!window.ForceGraph3D) throw new Error('3d-force-graph 分发缺失（/vendor/3d-force-graph.min.js 未就绪）——在 web 目录执行 npm run build 即可自动补齐（prepare-vendor）')
       if (cancelled || !containerRef.current) return
       // 容器在 Tabs 切换瞬间可能尺寸塌陷（0x0 导致 renderer 初始化无效且无报错）——延后一帧等布局
       const w = containerRef.current.clientWidth
@@ -145,11 +150,9 @@ export default function Graph3D({ spec }: { spec: Spec | null }) {
         .nodeLabel((n: any) => n.label)
         .nodeThreeObjectExtend(true)
         .nodeThreeObject((n: any) => {
-          const T = (window as any).THREE
-          if (!T) return undefined
-          const color = new T.Color(n.color)
-          const geo = n.kind === 'concept' ? new T.SphereGeometry(5, 16, 12) : new T.OctahedronGeometry(5)
-          return new T.Mesh(geo, new T.MeshLambertMaterial({ color, transparent: true, opacity: 0.92 }))
+          const color = new THREE.Color(n.color)
+          const geo = n.kind === 'concept' ? new THREE.SphereGeometry(5, 16, 12) : new THREE.OctahedronGeometry(5)
+          return new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.92 }))
         })
         .nodeColor((n: any) => n.color)
         .nodeVal((n: any) => (n.kind === 'concept' ? 6 : 2.5))
@@ -213,7 +216,6 @@ export default function Graph3D({ spec }: { spec: Spec | null }) {
     })
   }, [kindFilter, data])
 
-  console.log('[Graph3D] render: initErr=', initErr, 'hasConcepts=', hasConcepts, 'nodes=', data.nodes.length)
   if (initErr) {
     return (
       <Alert type="warning" showIcon message="三维视图初始化失败" description={initErr + '（WebGL 不可用或驱动限制时可回退 2D 结构视图）'} />
