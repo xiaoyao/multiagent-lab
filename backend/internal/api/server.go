@@ -120,7 +120,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/companion/ontologies/{id}/candidates", s.ontologyCompanionCandidates)
 	m.HandleFunc("GET /api/companion/ontologies/{id}/agents", s.ontologyCompanionAgents)
 	m.HandleFunc("POST /api/companion/ontologies/{id}/reset", s.resetCompanionOntology)
-	m.HandleFunc("GET /api/companion/ontologies/{id}/export-ttl", s.exportCompanionTTL) // REQ-284④：伴生子图 TTL 导出
+	m.HandleFunc("GET /api/companion/ontologies/{id}/export-ttl", s.exportCompanionTTL) // REQ-285④：伴生子图 TTL 导出
 	m.HandleFunc("GET /api/companion/bound-ontologies", s.companionBoundOntologies)
 	m.HandleFunc("GET /api/companion/graph-owner", s.companionGraphOwner)
 

@@ -4,7 +4,7 @@ import { DownloadOutlined } from '@ant-design/icons'
 import { useUI } from '../../../../store/ui'
 
 // ---------------------------------------------------------------------------
-// REQ-284④：伴生子图 TTL 导出——对话生长产物可进 Protégé 等外部工具
+// REQ-285④：伴生子图 TTL 导出——对话生长产物可进 Protégé 等外部工具
 // （与普通本体「进得来出得去」的互操作面对齐）。后端 GET
 // /api/companion/ontologies/{id}/export-ttl：EnsureHost → 全量三元组 → Turtle 序列化。
 // ---------------------------------------------------------------------------

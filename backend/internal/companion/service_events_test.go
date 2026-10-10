@@ -574,7 +574,7 @@ func TestSnapshotBackfillOnMissing(t *testing.T) {
 	}
 }
 
-// ---- REQ-284：伴生型详情分型与资产对齐 ----
+// ---- REQ-285：伴生型详情分型与资产对齐 ----
 
 // TestSPARQLBindingsToTTL TTL 序列化器：uri/literal/转义/lang/datatype 缩写/排序稳定。
 func TestSPARQLBindingsToTTL(t *testing.T) {

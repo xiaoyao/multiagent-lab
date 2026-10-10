@@ -24,7 +24,7 @@ import (
 //   GET  /api/companion/ontologies/{id}/agents                          绑定该本体的 agent 清单
 //   POST /api/companion/ontologies/{id}/reset                           本体级伴生图清空（DROP 子图+清全部绑定 agent 候选游标）
 //   GET  /api/companion/bound-ontologies                                伴生绑定本体 id 清单（资产列表「对话生长」徽标）
-//   GET  /api/companion/ontologies/{id}/export-ttl                      伴生子图 TTL 导出（REQ-284④ 资产出门）
+//   GET  /api/companion/ontologies/{id}/export-ttl                      伴生子图 TTL 导出（REQ-285④ 资产出门）
 //   GET  /api/companion/graph-owner?conversation_id=|agent_id=          解析伴生图归属（runtime-manager facade 兼容消费）
 // ---------------------------------------------------------------------------
 
@@ -303,7 +303,7 @@ func errBadRequest(msg string) error {
 	return &store.HTTPError{Status: http.StatusBadRequest, Msg: msg}
 }
 
-// exportCompanionTTL GET /api/companion/ontologies/{id}/export-ttl（REQ-284④：伴生子图 → Turtle 下载
+// exportCompanionTTL GET /api/companion/ontologies/{id}/export-ttl（REQ-285④：伴生子图 → Turtle 下载
 // ——对话生长产物可进 Protégé 等外部工具，与普通本体互操作面对齐）。
 func (s *Server) exportCompanionTTL(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

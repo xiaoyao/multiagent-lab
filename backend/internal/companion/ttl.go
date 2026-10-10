@@ -1,6 +1,6 @@
 package companion
 
-// ttl.go REQ-284④：伴生子图 TTL 导出——SPARQL JSON 绑定 → Turtle 序列化。
+// ttl.go REQ-285④：伴生子图 TTL 导出——SPARQL JSON 绑定 → Turtle 序列化。
 // 定位：让对话生长产物可进 Protégé 等外部工具（与普通本体「进得来出得去」的互操作面对齐）。
 // 语法取 N-Triples 兼容形态（合法 Turtle 子集）+ @prefix 头美化谓词；主宾实体走完整 IRI
 // （动态 slug 无前缀价值）。sparqlTerm/termToTurtle 复用 migrate216.go 既有定义。
@@ -77,7 +77,7 @@ func SPARQLBindingsToTTL(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("SPARQL 结果解析失败: %w", err)
 	}
 	var b strings.Builder
-	b.WriteString("# 伴生子图导出（eino-multiagent-lab REQ-284）——对话生长沉淀，薄本体词表 bot:\n")
+	b.WriteString("# 伴生子图导出（eino-multiagent-lab REQ-285）——对话生长沉淀，薄本体词表 bot:\n")
 	for _, p := range prefixNS {
 		fmt.Fprintf(&b, "@prefix %s: <%s> .\n", p[0], p[1])
 	}
