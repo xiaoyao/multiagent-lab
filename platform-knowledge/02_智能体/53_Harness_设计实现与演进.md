@@ -37,7 +37,7 @@ harness = 模型之外「怎么把事做安全、做扎实」的一层。五层�
 | 验证背压 | `internal/chat/verify.go` | verify_on_stop：运行收尾执行验证命令，失败→run.finished reason=verify_failed+独立 verify.failed 事件 |
 | 重试 | `internal/chat/retry.go` | 幂等错误白名单 N=2 指数退避（当前仅装配期 MCP 拉取） |
 | 沙箱后端 | `internal/runtime/` | inprocess/docker/k8s/auto（lastGood 粘滞）+agent/run 两作用域；runtime_settings DB 覆盖 env（REQ-191）；启动对账/确定性路由/端口探测/回环绑定（REQ-236） |
-| 事件契约 | `internal/chat/runner.go` | run_event 全集（tool.call/result 32KB 头尾截断/verify 独立事件/connector.degraded/hook.denied/approval.granted·denied 带 decision_source/run.started 生效策略透出 tool_approval {mode,source}） |
+| 事件契约 | `internal/chat/runner.go`（渲染层归并与时序条在 `web/src/components/TraceDrawer.tsx`——REQ-284：连续 delta 归并思考/正文段+四泳道 waterfall，治逐 token 行） | run_event 全集（tool.call/result 32KB 头尾截断/verify 独立事件/connector.degraded/hook.denied/approval.granted·denied 带 decision_source/run.started 生效策略透出 tool_approval {mode,source}） |
 | 装配预览 | `internal/api/handlers_toolpreview.go` | GET /api/agents/{id}/tool-preview（四源合并确定性预览+遮蔽告警，零 MCP 拨号）+ GET /api/hooks |
 | 分层侧板 | `web/src/components/AgentSidePanel.tsx` | Harness 页签：运行后端/沙箱资源/工作目录/验证命令/审批策略（三档+豁免+超时）/工具预览卡/hooks 卡（后端读取） |
 | 外部 harness 接口 | `internal/inference/acp.go` | dsh 通道面（ACP 长驻 stdio/session 语义转译/权限默认 deny；外部 CLI 后端不走装配链——harness 配置对其不生效） |
