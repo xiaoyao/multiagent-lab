@@ -10,6 +10,9 @@ import { DRAWER_SIZES, drawerSizeProps } from '../../../../lib/layout'
 // ---------------------------------------------------------------------------
 // 消费与审计 · 决策审计页签（SQLite 决策表 + derived_from 溯源链 + PROV-O 导出）。
 // A4（REQ-145/M22）：决策表分页统一 pageSize 10；溯源链抽屉拆入本文件。
+// REQ-290/M94 内容置换：去掉 KB 选择器依赖（subject_id 过滤随 KB 组织对象退役），
+// kind 筛选默认 ontology（本体消费侧视角；清空筛选可看 kg/kb/manual 全部留痕——
+// 决策审计是跨模块审计表，整表保留在本体侧）。
 // ---------------------------------------------------------------------------
 
 /** 客户端下载文本（PROV-O Turtle 导出） */
@@ -39,14 +42,14 @@ const KIND_OPTIONS = [
   { value: 'manual', label: 'manual（手工补录）' },
 ]
 
-export default function AuditDecisionTab({ kbId }: { kbId?: string }) {
+export default function AuditDecisionTab() {
   const { showToast } = useUI()
   const [form] = Form.useForm()
   const [busy, setBusy] = useState(false)
   const [decisions, setDecisions] = useState<OntoDecision[]>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [kindFilter, setKindFilter] = useState<string | undefined>(undefined)
+  const [kindFilter, setKindFilter] = useState<string | undefined>('ontology')
   const [lastId, setLastId] = useState<string | null>(null)
   const [chainTarget, setChainTarget] = useState<OntoDecision | null>(null)
   const [exporting, setExporting] = useState(false)
@@ -54,7 +57,7 @@ export default function AuditDecisionTab({ kbId }: { kbId?: string }) {
   const load = () => {
     setLoading(true)
     api
-      .listDecisions({ subject_kind: kindFilter, subject_id: kbId, limit: 50 })
+      .listDecisions({ subject_kind: kindFilter, limit: 50 })
       .then((r) => {
         setDecisions(r)
         setErr(null)
@@ -69,7 +72,7 @@ export default function AuditDecisionTab({ kbId }: { kbId?: string }) {
   useEffect(() => {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kbId, kindFilter])
+  }, [kindFilter])
 
   const submit = async () => {
     let v: any
@@ -101,8 +104,8 @@ export default function AuditDecisionTab({ kbId }: { kbId?: string }) {
   const doExport = async () => {
     setExporting(true)
     try {
-      const text = await api.provExport(kbId)
-      downloadText(`prov-audit-${kbId ?? 'all'}.ttl`, text, 'text/turtle;charset=utf-8')
+      const text = await api.provExport()
+      downloadText('prov-audit-all.ttl', text, 'text/turtle;charset=utf-8')
       showToast('已导出 PROV-O Turtle（Go 原生模板）')
     } catch (e: any) {
       showToast(e?.message ?? '导出失败', 'err')
@@ -173,7 +176,7 @@ export default function AuditDecisionTab({ kbId }: { kbId?: string }) {
           loading={loading}
           pagination={{ pageSize: 10, hideOnSinglePage: true }}
           size="small"
-          locale={{ emptyText: '暂无决策记录（KG 抽取/重建会自动留痕，也可在下方手工补录）' }}
+          locale={{ emptyText: '暂无决策记录（本体治理动作/KG 抽取会自动留痕，也可在下方手工补录；清空类别筛选可看全部）' }}
           scroll={{ x: 'max-content' }}
         />
       </Card>
@@ -193,8 +196,8 @@ export default function AuditDecisionTab({ kbId }: { kbId?: string }) {
             <Form.Item name="subject_kind" label="类别 subject_kind" initialValue="manual">
               <Select options={KIND_OPTIONS} />
             </Form.Item>
-            <Form.Item name="subject_id" label="主体 subject_id（可选，如 kb_id / 本体 id）">
-              <Input placeholder="如当前知识库 id" />
+            <Form.Item name="subject_id" label="主体 subject_id（可选，如本体 id / 库 id）">
+              <Input placeholder="如本体 id" />
             </Form.Item>
           </div>
           <Form.Item name="title" label="决策 title" rules={[{ required: true, message: '决策标题必填' }]}>

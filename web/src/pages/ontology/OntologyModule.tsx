@@ -32,7 +32,7 @@ const NAV: { key: SidebarKey; label: string; icon: React.ReactNode; desc: string
   { key: 'build', label: '本体构建', icon: <ApartmentOutlined />, desc: '六条构建路径' },
   { key: 'assets', label: '本体资产', icon: <DatabaseOutlined />, desc: '已构建本体统一管理 · 伴生候选' },
   { key: 'runtime', label: '本体运行', icon: <CloudServerOutlined />, desc: '按运行方式分组' },
-  { key: 'audit', label: '消费与审计', icon: <AuditOutlined />, desc: 'KG 图谱 · GraphRAG 试查 · 决策溯源' },
+  { key: 'audit', label: '消费与审计', icon: <AuditOutlined />, desc: '消费观测 · 决策审计 · PROV-O 溯源' },
 ]
 
 /** 侧边栏选中项（模块内持久化，切走再切回不丢位置）；默认页 = 学习中心。

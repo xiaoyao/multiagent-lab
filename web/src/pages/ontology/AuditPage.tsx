@@ -1,21 +1,19 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Select, Space, Tabs, Tag, Typography } from 'antd'
+import { Alert, Button, Space, Tabs, Tag, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { api } from '../../api/client'
-import type { OntoBuildSelectableKB } from '../../api/types'
-import AuditGraphTab from './components/audit/AuditGraphTab'
-import AuditQueryTab from './components/audit/AuditQueryTab'
+import type { RuntimeProfile } from '../../api/types'
+import AuditObserveTab, { hasQualityWarn } from './components/audit/AuditObserveTab'
 import AuditDecisionTab from './components/audit/AuditDecisionTab'
 import AuditHomeTab from './components/audit/AuditHomeTab'
 
 // ---------------------------------------------------------------------------
-// 消费与审计（第五栏，D-O15/REQ-110：去-semantica 化改造复用）
-// 原 Semantica 独立栏骨架保留（页头 + 状态条 + 页签），数据源切换为自研后端：
-//   KG 图谱 = GET /api/kg/{kbID}（SQLite 自存三表）
-//   GraphRAG 试查 = POST /api/kb/{id}/graphrag-search（向量命中 → KG 一跳扩展）
-//   决策审计 = /api/audit/decisions*（SQLite 决策表 + derived_from 溯源链）
-//   PROV-O 导出 = GET /api/audit/prov-export（Go 原生 Turtle 模板，零 Python）
-// B1（REQ-145/M22）：四个页签拆至 components/audit/（图谱/试查/决策/学习引导）。
+// 消费与审计（第五栏，D-O15/REQ-110；REQ-290/M94 内容置换）
+// 栏定位=本体消费侧观测台（D-O19），REQ-290 把边界厘清从「文案与来源徽标」推进到
+// 「内容归属」：KB 抽取 KG 的图谱观测与 GraphRAG 试查退役归知识库模块（能力在
+// 知识库 GraphRAG「图谱与统计」「全局问答」全量在位），本栏回填本体消费内容——
+// 消费观测（运行方案装载/质量快照 + TTL 关键词快查 + 消费面导航）+ 决策审计
+// （onto_decision 跨模块留痕，默认 ontology 过滤）+ PROV-O 导出。零后端变更。
 // ---------------------------------------------------------------------------
 
 /** 跨栏跳转到本栏（与 BuildPage/RuntimePage 的 onto-sidebar-change 机制一致） */
@@ -25,30 +23,25 @@ export function gotoAuditPane() {
 }
 
 export default function AuditPage() {
-  const [kbs, setKbs] = useState<OntoBuildSelectableKB[]>([])
-  const [kbsErr, setKbsErr] = useState<string | null>(null)
-  const [kbId, setKbId] = useState<string | undefined>(undefined)
-  const [tab, setTab] = useState('graph')
+  const [profiles, setProfiles] = useState<RuntimeProfile[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [tab, setTab] = useState('observe')
 
-  const loadKbs = () => {
+  const loadProfiles = () => {
+    setLoading(true)
     api
-      .selectableKBsForBuild()
-      .then((ls) => {
-        setKbs(ls)
-        setKbsErr(null)
-        setKbId((cur) => cur ?? ls.find((k) => k.kg_ready)?.id ?? ls[0]?.id)
-      })
-      .catch((e: any) => {
-        setKbs([])
-        setKbsErr(e?.message ?? '知识库列表加载失败')
-      })
+      .listRuntimeProfiles()
+      .then((ps) => setProfiles(ps))
+      .catch(() => setProfiles([]))
+      .finally(() => setLoading(false))
   }
 
   useEffect(() => {
-    loadKbs()
+    loadProfiles()
   }, [])
 
-  const cur = kbs.find((k) => k.id === kbId)
+  const running = (profiles ?? []).filter((p) => p.status === 'running')
+  const warnCount = running.filter(hasQualityWarn).length
 
   return (
     <div className="main">
@@ -62,60 +55,51 @@ export default function AuditPage() {
               <Tag color="purple" style={{ margin: 0 }}>
                 本体消费侧观测台
               </Tag>
-              <Tag style={{ margin: 0 }}>自研 KG · 零外部进程</Tag>
+              <Tag style={{ margin: 0 }}>TTL 消费 · 决策留痕</Tag>
             </div>
             <p className="work-head-desc">
-              本体消费侧观测台（D-O19）：KG 检索默认走本体 TTL 装载链路（带来源徽标，与 KB 抽取来源可切换、永不混排），构建/抽取决策全程留痕可溯源。
+              本体消费侧观测台（D-O19/REQ-290）：观测本体 TTL 装载后的消费面（消费一览 / 关键词快查 / 运行态实渲 · SPARQL · AI 消费 · CQ 验收导航），构建与治理决策全程留痕可溯源并导出 PROV-O。知识库文本抽取 KG 的展示与治理在知识库模块（内容置换出本栏）。
             </p>
           </div>
           <Space size={8} wrap>
-            <Select
-              style={{ width: 300 }}
-              value={kbId}
-              onChange={setKbId}
-              placeholder={kbsErr ? '知识库不可达' : '选择知识库'}
-              options={kbs.map((k) => ({
-                value: k.id,
-                label: `${k.name}（KG ${k.kg_entities}/${k.kg_relationships}${k.kg_ready ? '' : ' · 未建'}）`,
-              }))}
-              notFoundContent={kbsErr ? '知识库接口未就绪' : '暂无知识库'}
-            />
-            <Button icon={<ReloadOutlined />} onClick={loadKbs}>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={loadProfiles}>
               刷新
             </Button>
           </Space>
         </div>
 
-        {/* 状态条：当前库 KG 规模 + 重建入口 */}
+        {/* 状态条：运行方案聚合 + 质量低分警示（REQ-234① 口径，只警示不阻断） */}
         <div className="sema-status">
-          {kbsErr ? (
-            <Alert type="warning" showIcon title="知识库列表不可用" description={kbsErr} />
-          ) : !cur ? (
-            <Alert type="info" showIcon title="先选择一个知识库" description="没有合适的库？先到「知识库」页创建并导入文档。" />
+          {profiles === null ? (
+            <Alert type="info" showIcon title="运行方案加载中…" />
+          ) : running.length === 0 ? (
+            <Alert
+              type="info"
+              showIcon
+              title="暂无运行中的本体方案"
+              description="消费面观测需先启动方案：到「本体运行」栏启动（或创建）运行方案后，此处展示装载版本与质量快照。"
+            />
           ) : (
             <Alert
-              type={cur.kg_ready ? 'success' : 'warning'}
+              type={warnCount > 0 ? 'warning' : 'success'}
               showIcon
               title={
                 <Space size={8} wrap>
-                  <span>{cur.name}</span>
-                  <Tag color="blue" style={{ margin: 0 }}>
-                    {cur.mode === 'graphrag' ? 'graphrag 模式' : 'rag 模式'}
-                  </Tag>
-                  <Tag color={cur.kg_ready ? 'green' : 'default'} style={{ margin: 0 }}>
-                    {cur.kg_ready ? 'KG 已建' : 'KG 未建'}
-                  </Tag>
+                  <span>
+                    <b>{running.length}</b> 个运行方案消费中
+                  </span>
+                  {warnCount > 0 && (
+                    <Tag color="orange" style={{ margin: 0 }}>
+                      质量低分警示 ×{warnCount}
+                    </Tag>
+                  )}
                 </Space>
               }
               description={
                 <Space size={16} wrap>
-                  <span>文档 <b>{cur.doc_count}</b></span>
-                  <span>chunk <b>{cur.chunk_count}</b></span>
-                  <span>实体 <b>{cur.kg_entities}</b></span>
-                  <span>关系 <b>{cur.kg_relationships}</b></span>
-                  {/* M36/KB-13：重建入口收敛知识库侧（观测台只读定位，P2「展示位≠管理入口」） */}
+                  <span>消费面见「消费观测」页签；决策留痕见「决策审计」页签</span>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    数据来源：知识库「{cur.name}」· 治理在知识库模块
+                    质量快照由方案启动异步快评写入（REQ-234①），低分仅警示不阻断
                   </Typography.Text>
                 </Space>
               }
@@ -127,9 +111,8 @@ export default function AuditPage() {
           activeKey={tab}
           onChange={setTab}
           items={[
-            { key: 'graph', label: 'KG 图谱', children: <AuditGraphTab kbId={kbId} kbName={cur?.name} /> },
-            { key: 'query', label: 'KG 检索', children: <AuditQueryTab kbId={kbId} /> },
-            { key: 'audit', label: '决策审计', children: <AuditDecisionTab kbId={kbId} /> },
+            { key: 'observe', label: '消费观测', children: <AuditObserveTab profiles={profiles ?? []} loading={loading} onReload={loadProfiles} /> },
+            { key: 'audit', label: '决策审计', children: <AuditDecisionTab /> },
             { key: 'home', label: '学习引导', children: <AuditHomeTab /> },
           ]}
         />
