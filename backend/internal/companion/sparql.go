@@ -277,14 +277,114 @@ SELECT ?src ?rel ?dst ?at ?count WHERE {
 } ORDER BY ?at LIMIT 300`, BotNS, GraphURI(graphID))
 }
 
-// SelectLabels 会话图概念实体标签清单（状态回显 + KG 检索源匹配用；
+// SelectLabels 伴生图概念实体标签清单（状态回显 + KG 检索源匹配 + REQ-194① 对齐清单；
 // 限定 bot:Concept——bot:Relation 边节点同样带 rdfs:label（关系名），不属实体）。
+// REQ-286 B3：别名平铺——bot:alias 一并返回（召回/对齐面含别名，「K8s」等变体可匹配）。
 func SelectLabels(graphID string) string {
 	return fmt.Sprintf(`PREFIX bot: <%s>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?label WHERE {
-  GRAPH <%s> { ?s a bot:Concept ; rdfs:label ?label }
-} ORDER BY ?label LIMIT 200`, BotNS, GraphURI(graphID))
+  GRAPH <%s> {
+    { ?s a bot:Concept ; rdfs:label ?label }
+    UNION
+    { ?s a bot:Concept ; bot:alias ?label }
+  }
+} ORDER BY ?label LIMIT 300`, BotNS, GraphURI(graphID))
+}
+
+// AddAlias REQ-286 B3：实体别名挂接（bot:alias 三元组——变体不删不丢，同实体多叫法）。
+func AddAlias(graphID, entityLabel, alias string) string {
+	return fmt.Sprintf(`PREFIX bot: <%s>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+INSERT DATA {
+  GRAPH <%s> {
+    <%s> bot:alias %q ; a bot:Concept .
+  }
+}`, BotNS, GraphURI(graphID), EntityURI(entityLabel), turtleEscape(alias))
+}
+
+// SelectAliasOwner REQ-286 B3：别名→主实体标签解析（召回命中别名后回溯主实体）。
+func SelectAliasOwner(graphID, alias string) string {
+	return fmt.Sprintf(`PREFIX bot: <%s>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?label WHERE {
+  GRAPH <%s> { ?s bot:alias %q ; rdfs:label ?label }
+} LIMIT 1`, BotNS, GraphURI(graphID), turtleEscape(alias))
+}
+
+// RenameEntity REQ-286 C1：实体重命名（迁移式）——返回顺序操作序列（多次独立 Update 执行；
+// oxigraph 对 `;` 串联多操作更新执行不完整——真机实证只落首段，必须拆步）。
+// 步骤：①新实体（label+类型）+旧名转别名 ②边主体位重定向 ③边客体位重定向 ④旧主体三元组清理。
+func RenameEntity(graphID, oldLabel, newLabel string) []string {
+	oldURI, newURI := EntityURI(oldLabel), EntityURI(newLabel)
+	g := GraphURI(graphID)
+	step1 := fmt.Sprintf(`PREFIX bot: <%s>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+INSERT DATA { GRAPH <%s> { <%s> rdfs:label %q ; a bot:Concept . <%s> bot:alias %q . } }`,
+		BotNS, g, newURI, turtleEscape(newLabel), newURI, turtleEscape(oldLabel))
+	step2 := fmt.Sprintf(`PREFIX bot: <%s>
+DELETE { GRAPH <%s> { ?edge bot:subject <%s> } }
+INSERT { GRAPH <%s> { ?edge bot:subject <%s> } }
+WHERE { GRAPH <%s> { ?edge a bot:Relation ; bot:subject <%s> } }`,
+		BotNS, g, oldURI, g, newURI, g, oldURI)
+	step3 := fmt.Sprintf(`PREFIX bot: <%s>
+DELETE { GRAPH <%s> { ?edge bot:object <%s> } }
+INSERT { GRAPH <%s> { ?edge bot:object <%s> } }
+WHERE { GRAPH <%s> { ?edge a bot:Relation ; bot:object <%s> } }`,
+		BotNS, g, oldURI, g, newURI, g, oldURI)
+	step4 := fmt.Sprintf(`DELETE { GRAPH <%s> { <%s> ?p ?o } }
+WHERE { GRAPH <%s> { <%s> ?p ?o } }`, g, oldURI, g, oldURI)
+	return []string{step1, step2, step3, step4}
+}
+
+// DeleteEntity REQ-286 C1：删除实体（顺序步骤：边主体位整边删→边客体位整边删→主体三元组删）。
+func DeleteEntity(graphID, label string) []string {
+	e := EntityURI(label)
+	g := GraphURI(graphID)
+	step1 := fmt.Sprintf(`PREFIX bot: <%s>
+DELETE { GRAPH <%s> { ?e ?p ?o } }
+WHERE { GRAPH <%s> { ?e a bot:Relation ; ?p ?o . ?e bot:subject <%s> } }`, BotNS, g, g, e)
+	step2 := fmt.Sprintf(`PREFIX bot: <%s>
+DELETE { GRAPH <%s> { ?e ?p ?o } }
+WHERE { GRAPH <%s> { ?e a bot:Relation ; ?p ?o . ?e bot:object <%s> } }`, BotNS, g, g, e)
+	step3 := fmt.Sprintf(`DELETE { GRAPH <%s> { <%s> ?p ?o } }
+WHERE { GRAPH <%s> { <%s> ?p ?o } }`, g, e, g, e)
+	return []string{step1, step2, step3}
+}
+
+// SelectEdgeByURI REQ-286 C1：按边 URI 取边（存在性与主体/客体标签，编辑前校验）。
+func SelectEdgeByURI(graphID, edgeURI string) string {
+	return fmt.Sprintf(`PREFIX bot: <%s>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?src ?rel ?dst WHERE {
+  GRAPH <%s> {
+    <%s> a bot:Relation ; bot:relName ?rel ; bot:subject ?s ; bot:object ?o .
+    ?s rdfs:label ?src . ?o rdfs:label ?dst .
+  }
+} LIMIT 1`, BotNS, GraphURI(graphID), edgeURI)
+}
+
+// DeleteEdgeByURI REQ-286 C1：删除关系边（整边删除，含 confirmCount 等附属）。
+func DeleteEdgeByURI(graphID, edgeURI string) string {
+	return fmt.Sprintf(`DELETE { GRAPH <%s> { <%s> ?p ?o } }
+WHERE { GRAPH <%s> { <%s> ?p ?o } }`, GraphURI(graphID), edgeURI, GraphURI(graphID), edgeURI)
+}
+
+// SelectRelationEdges 活跃关系边含边 URI（前端关系表行操作定位用；REQ-286 C1）。
+// 与 SelectEdges 同形状增 ?edge 列——前端只增不改兼容。
+func SelectRelationEdges(graphID string) string {
+	return fmt.Sprintf(`PREFIX bot: <%s>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+SELECT ?edge ?src ?rel ?dst ?at ?count WHERE {
+  GRAPH <%s> {
+    ?edge a bot:Relation ; bot:relName ?rel ; bot:subject ?s ; bot:object ?o ; prov:generatedAtTime ?at .
+    ?s rdfs:label ?src .
+    ?o rdfs:label ?dst .
+    OPTIONAL { ?e bot:confirmCount ?count }
+    FILTER NOT EXISTS { ?e bot:invalidAt ?any }
+  }
+} ORDER BY ?at LIMIT 300`, BotNS, GraphURI(graphID))
 }
 
 // DropGraph 伴生图整体摘除（低侵入三原则③；REQ-211 起作用域=智能体）。

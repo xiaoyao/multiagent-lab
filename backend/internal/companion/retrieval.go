@@ -227,6 +227,19 @@ func mergeRecall(vecHits, lexHits []string) ([]string, map[string]string) {
 	return merged, matchOf
 }
 
+// resolveAliasOwner REQ-286 B3：别名 → 主实体标签（非别名返回空串）。
+func (s *Service) resolveAliasOwner(ctx context.Context, ontID, alias string) string {
+	raw, err := s.graphQuery(ctx, ontID, SelectAliasOwner(ontID, alias))
+	if err != nil {
+		return ""
+	}
+	owners := parseLabelValues(raw)
+	if len(owners) > 0 {
+		return owners[0]
+	}
+	return ""
+}
+
 // queryLabels 本体伴生子图实体标签清单（REQ-216：读侧兜底拉起——graphQuery 内 Ensure
 // 确保宿主方案 running；宿主方案不可达返回空，不阻断主链路）。
 func (s *Service) queryLabels(ctx context.Context, ontologyID string) ([]string, error) {

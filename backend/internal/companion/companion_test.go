@@ -51,10 +51,11 @@ func TestToCandidates(t *testing.T) {
 	}
 	out := &extractOut{}
 	out.Concepts = append(out.Concepts, struct {
-		Name       string  `json:"name"`
-		Definition string  `json:"definition"`
-		Confidence float64 `json:"confidence"`
-		Source     string  `json:"source"`
+		Name       string   `json:"name"`
+		Aliases    []string `json:"aliases"`
+		Definition string   `json:"definition"`
+		Confidence float64  `json:"confidence"`
+		Source     string   `json:"source"`
 	}{Name: "Pod 扩容", Definition: "副本数水平伸缩动作", Confidence: 0.9, Source: "Pod 扩容"})
 	out.Relations = append(out.Relations, struct {
 		RelName    string  `json:"rel_name"`
@@ -229,7 +230,7 @@ func TestCompanionPromptHint(t *testing.T) {
 		t.Fatal("空 hint/空清单不应含聚焦行与对齐节")
 	}
 	withHint := companionPrompt("语料", "重点关注 Kubernetes 部署术语", "")
-	if !strings.Contains(withHint, "5. 领域聚焦要求（优先级最高）：重点关注 Kubernetes 部署术语") {
+	if !strings.Contains(withHint, "领域聚焦要求（优先级最高）：重点关注 Kubernetes 部署术语") {
 		t.Fatalf("hint 应追加为第 5 条: %s", withHint)
 	}
 	// REQ-194①：对齐节注入位于语料之前
@@ -429,5 +430,94 @@ func TestStartCooldownAfterFailure(t *testing.T) {
 	_, _ = p.EnsureHostPlan(context.Background(), "ont_e")
 	if starts != 2 {
 		t.Fatalf("冷却过期应重试 start, got %d", starts)
+	}
+}
+
+// TestNormalizeLabel REQ-286 B1：label 规范化——括号备注提取转别名/空白折叠。
+func TestNormalizeLabel(t *testing.T) {
+	main, aliases := NormalizeLabel("Pod（容器组） ")
+	if main != "Pod" || len(aliases) != 1 || aliases[0] != "容器组" {
+		t.Fatalf("括号备注应提取为别名: %q %v", main, aliases)
+	}
+	main, aliases = NormalizeLabel("滚动更新(Rolling Update)")
+	if main != "滚动更新" || len(aliases) != 1 || aliases[0] != "Rolling Update" {
+		t.Fatalf("半角括号同样提取: %q %v", main, aliases)
+	}
+	main, aliases = NormalizeLabel("K8s")
+	if main != "K8s" || len(aliases) != 0 {
+		t.Fatalf("无括号原样: %q %v", main, aliases)
+	}
+}
+
+// TestNormalizeKey REQ-286 B1：比对键 ASCII 大小写折叠（「POD」「Pod」「pod」同键）。
+func TestNormalizeKey(t *testing.T) {
+	if normalizeKey("POD") != normalizeKey("Pod") || normalizeKey("Pod") != normalizeKey("pod") {
+		t.Fatal("ASCII 大小写应折叠同键")
+	}
+	if normalizeKey("K8s") != normalizeKey("k8s") {
+		t.Fatal("k8s 大小写应同键")
+	}
+	if normalizeKey("滚动更新") != normalizeKey("滚动更新 ") {
+		t.Fatal("空白差异应同键")
+	}
+}
+
+// TestScanGenusCandidates REQ-286 A3：属类模式规则——定义含「是一种」产出低置信上下位候选。
+func TestScanGenusCandidates(t *testing.T) {
+	cands := []*store.CompanionCandidate{
+		{Kind: "concept", Name: "DaemonSet", Definition: "是一种确保每个节点运行一份副本的工作负载", ConversationID: "c1", AgentID: "a1"},
+		{Kind: "concept", Name: "Pod", Definition: "最小调度单元", ConversationID: "c1", AgentID: "a1"},
+	}
+	out := ScanGenusCandidates(cands)
+	if len(out) != 1 {
+		t.Fatalf("应产出 1 条属类建议: %d", len(out))
+	}
+	g := out[0]
+	if g.Kind != "relation" || g.RelName != "属于" || g.RelTarget == "" || g.Note == "" {
+		t.Fatalf("属类建议形态不符: %+v", g)
+	}
+	if g.Confidence >= 0.5 {
+		t.Fatalf("模式建议应低置信: %v", g.Confidence)
+	}
+}
+
+// TestMineRelationsPrompt REQ-286 A2：挖掘提示词含实体清单与关系类型清单。
+func TestMineRelationsPrompt(t *testing.T) {
+	p := mineRelationsPrompt([]GraphNode{
+		{Label: "滚动更新", Kind: "Concept", Definition: "逐批替换实例"},
+		{Label: "HPA", Kind: "Concept"},
+		{Label: "引发", Kind: "Relation"},
+	})
+	if !strings.Contains(p, "滚动更新：逐批替换实例") || !strings.Contains(p, "HPA") {
+		t.Fatalf("实体清单应含 label 与定义: %s", p)
+	}
+	if strings.Contains(p, "- 引发") {
+		t.Fatal("Relation 边节点不应进实体清单")
+	}
+	if !strings.Contains(p, "上下位") || !strings.Contains(p, "禁止自指") {
+		t.Fatal("应含关系类型清单与自指禁令")
+	}
+}
+
+// TestMineToCandidates REQ-286 A2：挖掘输出→候选（key 对齐已有实体规范名+自指剔除+批内去重）。
+func TestMineToCandidates(t *testing.T) {
+	out := &mineOut{Relations: []struct {
+		RelName    string  `json:"rel_name"`
+		Source     string  `json:"source"`
+		Target     string  `json:"target"`
+		Definition string  `json:"definition"`
+		Confidence float64 `json:"confidence"`
+	}{
+		{"属于", "pod", "工作负载", "pod 是一种工作负载", 0.7},
+		{"属于", "pod", "工作负载", "重复条目", 0.5},
+		{"依赖", "x", "x", "自指", 0.9},
+	}}
+	cands := pruneRelationsOnly(mineToCandidates("ont1", "agt1", out, []string{"Pod", "工作负载"}))
+	if len(cands) != 1 {
+		t.Fatalf("应剩 1 条（重复与自指剔除）: %d", len(cands))
+	}
+	c := cands[0]
+	if c.Name != "Pod" || c.RelTarget != "工作负载" {
+		t.Fatalf("端点应对齐已有实体规范名: %+v", c)
 	}
 }

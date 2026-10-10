@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -320,4 +321,110 @@ func (s *Server) exportCompanionTTL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="companion-%s.ttl"`, id))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// ---------------------------------------------------------------------------
+// REQ-286/M91 伴生图质量三维度 API（本体视角；编辑动作落 onto_decision 审计+快照同步）：
+//   POST /api/companion/ontologies/{id}/mine-relations     关系挖掘补抽（A2，同步单次 LLM）
+//   POST /api/companion/ontologies/{id}/entities/edit      实体编辑（C1：改 label/定义）
+//   POST /api/companion/ontologies/{id}/entities/delete    删除实体（C1：主体+关联边）
+//   POST /api/companion/ontologies/{id}/entities/merge     人工合并（B4：from 并入 to）
+//   POST /api/companion/ontologies/{id}/relations/add      补关系（C1：两端须为图内实体）
+//   POST /api/companion/ontologies/{id}/relations/delete   删关系（C1：按边 URI）
+// ---------------------------------------------------------------------------
+
+// mineCompanionRelations POST …/mine-relations（REQ-286 A2）。
+func (s *Server) mineCompanionRelations(w http.ResponseWriter, r *http.Request) {
+	n, err := s.Companion.MineRelations(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": n})
+}
+
+// editCompanionEntity POST …/entities/edit（REQ-286 C1）。
+func (s *Server) editCompanionEntity(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Label         string `json:"label"`
+		NewLabel      string `json:"new_label"`
+		NewDefinition string `json:"new_definition"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, errBadRequest("请求体非法"))
+		return
+	}
+	if err := s.Companion.EditEntity(r.Context(), r.PathValue("id"), body.Label, body.NewLabel, body.NewDefinition); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// deleteCompanionEntity POST …/entities/delete（REQ-286 C1）。
+func (s *Server) deleteCompanionEntity(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Label) == "" {
+		writeErr(w, errBadRequest("label 必填"))
+		return
+	}
+	if err := s.Companion.DeleteEntity(r.Context(), r.PathValue("id"), body.Label); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// mergeCompanionEntity POST …/entities/merge（REQ-286 B4）。
+func (s *Server) mergeCompanionEntity(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, errBadRequest("请求体非法"))
+		return
+	}
+	if err := s.Companion.MergeEntity(r.Context(), r.PathValue("id"), body.From, body.To); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// addCompanionRelation POST …/relations/add（REQ-286 C1）。
+func (s *Server) addCompanionRelation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Source     string `json:"source"`
+		RelName    string `json:"rel_name"`
+		Target     string `json:"target"`
+		Definition string `json:"definition"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, errBadRequest("请求体非法"))
+		return
+	}
+	if err := s.Companion.AddRelationManual(r.Context(), r.PathValue("id"), body.Source, body.RelName, body.Target, body.Definition); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// deleteCompanionRelation POST …/relations/delete（REQ-286 C1）。
+func (s *Server) deleteCompanionRelation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		EdgeURI string `json:"edge_uri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.EdgeURI) == "" {
+		writeErr(w, errBadRequest("edge_uri 必填"))
+		return
+	}
+	if err := s.Companion.DeleteRelationManual(r.Context(), r.PathValue("id"), body.EdgeURI); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

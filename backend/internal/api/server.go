@@ -123,6 +123,13 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/companion/ontologies/{id}/export-ttl", s.exportCompanionTTL) // REQ-285④：伴生子图 TTL 导出
 	m.HandleFunc("GET /api/companion/bound-ontologies", s.companionBoundOntologies)
 	m.HandleFunc("GET /api/companion/graph-owner", s.companionGraphOwner)
+	// REQ-286/M91：伴生图质量三维度（关系挖掘/实体编辑/合并/关系增删）
+	m.HandleFunc("POST /api/companion/ontologies/{id}/mine-relations", s.mineCompanionRelations)
+	m.HandleFunc("POST /api/companion/ontologies/{id}/entities/edit", s.editCompanionEntity)
+	m.HandleFunc("POST /api/companion/ontologies/{id}/entities/delete", s.deleteCompanionEntity)
+	m.HandleFunc("POST /api/companion/ontologies/{id}/entities/merge", s.mergeCompanionEntity)
+	m.HandleFunc("POST /api/companion/ontologies/{id}/relations/add", s.addCompanionRelation)
+	m.HandleFunc("POST /api/companion/ontologies/{id}/relations/delete", s.deleteCompanionRelation)
 
 	// Projects
 	m.HandleFunc("GET /api/projects", s.listProjects)

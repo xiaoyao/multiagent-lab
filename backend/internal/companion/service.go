@@ -32,7 +32,8 @@ const companionSchema = `{
   "type": "object",
   "properties": {
     "concepts": {"type": "array", "items": {"type": "object", "properties": {
-      "name": {"type": "string"}, "definition": {"type": "string"},
+      "name": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}},
+      "definition": {"type": "string"},
       "confidence": {"type": "number"}, "source": {"type": "string"}}, "required": ["name"]}},
     "relations": {"type": "array", "items": {"type": "object", "properties": {
       "rel_name": {"type": "string"}, "source": {"type": "string"}, "target": {"type": "string"},
@@ -49,10 +50,11 @@ const companionSchema = `{
 // extractOut 抽取输出结构。
 type extractOut struct {
 	Concepts []struct {
-		Name       string  `json:"name"`
-		Definition string  `json:"definition"`
-		Confidence float64 `json:"confidence"`
-		Source     string  `json:"source"`
+		Name       string   `json:"name"`
+		Aliases    []string `json:"aliases"`
+		Definition string   `json:"definition"`
+		Confidence float64  `json:"confidence"`
+		Source     string   `json:"source"`
 	} `json:"concepts"`
 	Relations []struct {
 		RelName    string  `json:"rel_name"`
@@ -78,8 +80,9 @@ func companionPrompt(corpus, hint, alignment string) string {
 	var b strings.Builder
 	b.WriteString("你是本体候选抽取助手。阅读以下对话片段，抽取其中值得沉淀为知识的领域概念、概念间关系与事件。\n")
 	b.WriteString("要求：\n")
-	b.WriteString("1. concepts：领域实体/术语（如 Pod、滚动更新、淋巴结局限性切除），name 用唯一中文短语，definition 一句话，confidence 0~1。\n")
-	b.WriteString("2. relations：概念间有意义的关联，rel_name 用动名词（如「引发」「适用于」「依赖」），source/target 引用 concepts 中的 name，evidence 为原文依据短句。\n")
+	b.WriteString("1. concepts：领域实体/术语（如 Pod、滚动更新、淋巴结局限性切除），name 用唯一中文短语，definition 一句话，confidence 0~1。同一实体的多种叫法（中英文/缩写/带备注）不要拆成多个概念——name 取规范名（优先级：既有实体名 > 中文领域术语 > 英文原名），其余叫法放进 aliases 数组。\n")
+	// REQ-286 A1：关系是一等抽取目标——类型清单引导（引导不设配额，宁缺毋滥口径不变）
+	b.WriteString("2. relations：概念间有意义的关联，rel_name 用动名词。常见关系类型（不限于）：属于/是一种（上下位）、组成、依赖、引发、适用于、前置、对比、协同；定义型陈述（「X 是一种 Y」）同样蕴含上下位关系，请一并抽取。source/target 引用 concepts 中的 name，evidence 为原文依据短句。\n")
 	b.WriteString("3. events：带时间性的动作/变更/结论（如「2026-09 完成灰度切换」），time_scope 填事件时间范围（如「2026-09」，对话未明示则留空）。\n")
 	b.WriteString("4. 只抽取对话中明确陈述的事实，不要推测；没有可抽内容就返回三个空数组。\n")
 	if strings.TrimSpace(hint) != "" {
@@ -471,6 +474,8 @@ func (s *Service) ExtractNew(ctx context.Context, convID, agentID, runID string)
 		markBatchRank(cands)      // REQ-227②：批内分位（置信校准——治 LLM 自评虚高）
 		// REQ-283 A：抽取自检规则臂（自指丢弃/批内去重/悬空端点注记）——污染在落库前拦截
 		cands, pruned := pruneCompanionCandidates(cands, known)
+		// REQ-286 A3：属类模式规则建议（零 LLM，低置信进确认流）
+		cands = append(cands, ScanGenusCandidates(cands)...)
 		if err := s.Store.CreateCompanionCandidates(cands); err != nil {
 			wcancel()
 			emit("companion.extract", map[string]any{"phase": "error", "window": i + 1, "total": len(windows), "message": "候选落库失败: " + err.Error()})
@@ -637,17 +642,43 @@ func toCandidates(convID, agentID string, msgs []*store.Message, out *extractOut
 		}
 		return msgs[len(msgs)-1].ID, truncate(text, 120)
 	}
+	// REQ-286 B3：本批内别名归并——concept 的 aliases/括号备注若与本批其他概念名同 key，别名指向主概念；
+	// 与既有实体同 key 的候选在入图时由 ResolveNode 归并。此处仅批内收集与跳过。
+	aliasOwners := map[string]string{} // normalizeKey(alias) → 规范概念名
+	for _, c := range out.Concepts {
+		if strings.TrimSpace(c.Name) == "" {
+			continue
+		}
+		main, extra := NormalizeLabel(c.Name)
+		aliasOwners[normalizeKey(main)] = main
+		for _, a := range append(c.Aliases, extra...) {
+			if ka := normalizeKey(a); ka != "" {
+				aliasOwners[ka] = main
+			}
+		}
+	}
+	inBatch := map[string]bool{}
+	for _, c := range out.Concepts {
+		if m, _ := NormalizeLabel(c.Name); m != "" {
+			inBatch[normalizeKey(m)] = true
+		}
+	}
 	var cands []*store.CompanionCandidate
 	add := func(c *store.CompanionCandidate) {
 		c.ConversationID, c.AgentID, c.Status = convID, agentID, "pending"
 		cands = append(cands, c)
 	}
 	for _, c := range out.Concepts {
-		if strings.TrimSpace(c.Name) == "" {
+		main, _ := NormalizeLabel(c.Name)
+		if strings.TrimSpace(main) == "" {
+			continue
+		}
+		// 本概念名恰为本批其他概念的别名 → 主概念已承载，跳过（防同一实体批内多份）
+		if owner := aliasOwners[normalizeKey(main)]; owner != "" && normalizeKey(owner) != normalizeKey(main) && inBatch[normalizeKey(owner)] {
 			continue
 		}
 		mid, excerpt := anchor(c.Source)
-		add(&store.CompanionCandidate{Kind: "concept", Name: truncate(c.Name, 120), Definition: truncate(c.Definition, 500), Confidence: c.Confidence, SourceMessageID: mid, SourceExcerpt: excerpt})
+		add(&store.CompanionCandidate{Kind: "concept", Name: truncate(main, 120), Definition: truncate(c.Definition, 500), Confidence: c.Confidence, SourceMessageID: mid, SourceExcerpt: excerpt})
 	}
 	for _, r := range out.Relations {
 		if strings.TrimSpace(r.RelName) == "" || strings.TrimSpace(r.Source) == "" || strings.TrimSpace(r.Target) == "" {
@@ -697,20 +728,50 @@ func (s *Service) ConfirmCandidate(ctx context.Context, candID, mode string) (*s
 	if err := s.graphUpdate(ctx, ontID, SeedSchema()); err != nil {
 		return nil, fmt.Errorf("种子 schema 预置失败: %w", err)
 	}
+	// REQ-286 B1/B2/B3：入图前归并解析——normalizeKey 命中已有实体 / 向量 ≥0.8 并入 /
+	// 括号备注提取转别名；relation 两端同解析。canonical 即入图规范名，变体挂 bot:alias。
+	cnSrc, err := s.ResolveNode(ctx, ontID, c.Name)
+	if err != nil {
+		return nil, fmt.Errorf("归并解析失败（主体 %s）: %w", c.Name, err)
+	}
+	cnDst := resolvedNode{Canonical: c.RelTarget}
+	if c.Kind == "relation" && strings.TrimSpace(c.RelTarget) != "" {
+		if cnDst, err = s.ResolveNode(ctx, ontID, c.RelTarget); err != nil {
+			return nil, fmt.Errorf("归并解析失败（客体 %s）: %w", c.RelTarget, err)
+		}
+	}
+	if cnSrc.MergedFrom != "" || cnDst.MergedFrom != "" {
+		log.Printf("[companion] REQ-286 归并入图：候选 %s（%s→%s / %s→%s）", c.ID, c.Name, cnSrc.Canonical, c.RelTarget, cnDst.Canonical)
+	}
+	defer func() {
+		// 别名挂接在入图后执行（失败仅日志）
+		extraSrc := []string(nil)
+		if cnSrc.MergedFrom != "" && cnSrc.MergedFrom != cnSrc.Canonical {
+			extraSrc = []string{c.Name}
+		}
+		s.attachAliases(ctx, ontID, cnSrc.Canonical, append(cnSrc.Aliases, extraSrc...))
+		if c.Kind == "relation" {
+			extraDst := []string(nil)
+			if cnDst.MergedFrom != "" && cnDst.MergedFrom != cnDst.Canonical {
+				extraDst = []string{c.RelTarget}
+			}
+			s.attachAliases(ctx, ontID, cnDst.Canonical, append(cnDst.Aliases, extraDst...))
+		}
+	}()
 	if c.Kind == "relation" {
 		// REQ-227① 印证聚合：活跃旧边连同客体——object 相同=同一事实再确认，聚合计数不建新边；
 		// 不同=矛盾，走失效化+语义检测+新边既有路径
-		raw, err := s.graphQuery(ctx, ontID, FindActiveEdgeWithObject(ontID, c.Name, c.RelName))
+		raw, err := s.graphQuery(ctx, ontID, FindActiveEdgeWithObject(ontID, cnSrc.Canonical, c.RelName))
 		if err != nil {
 			return nil, fmt.Errorf("矛盾检测查询失败: %w", err)
 		}
 		edge, objURI, _ := parseEdgeWithObject(raw)
-		if edge != "" && objURI != "" && objURI == EntityURI(c.RelTarget) {
+		if edge != "" && objURI != "" && objURI == EntityURI(cnDst.Canonical) {
 			oldCount := s.readConfirmCount(ctx, ontID, edge)
 			if err := s.graphUpdate(ctx, ontID, AggregateConfirmCountWrite(ontID, edge, c.ID, oldCount, oldCount+1, now)); err != nil {
 				return nil, fmt.Errorf("印证聚合失败: %w", err)
 			}
-			log.Printf("[companion] 印证聚合：候选 %s（%s —%s→ %s）与活跃边同事实，confirmCount=%d", c.ID, c.Name, c.RelName, c.RelTarget, oldCount+1)
+			log.Printf("[companion] 印证聚合：候选 %s（%s —%s→ %s）与活跃边同事实，confirmCount=%d", c.ID, cnSrc.Canonical, c.RelName, cnDst.Canonical, oldCount+1)
 			s.audit("companion_confirm_aggregate", c.ID, fmt.Sprintf("伴生印证聚合：%s —%s→ %s（第 %d 次确认）", c.Name, c.RelName, c.RelTarget, oldCount+1), map[string]any{"agent_id": c.AgentID, "ontology_id": ontID, "edge": edge})
 			emitIngest("aggregate", oldCount+1)
 			s.invalidateLabelCache(ontID)
@@ -727,14 +788,14 @@ func (s *Service) ConfirmCandidate(ctx context.Context, candID, mode string) (*s
 		}
 		// REQ-194⑤：语义矛盾二分类（LLM 增强路径，失败/无连接静默跳过）
 		s.semanticConflictCheck(ctx, ontID, c, now)
-		if err := s.graphUpdate(ctx, ontID, InsertRelationTriples(ontID, c.ID, c.RelName, c.Name, c.RelTarget, c.Definition, c.Confidence, c.SourceMessageID, now)); err != nil {
+		if err := s.graphUpdate(ctx, ontID, InsertRelationTriples(ontID, c.ID, c.RelName, cnSrc.Canonical, cnDst.Canonical, c.Definition, c.Confidence, c.SourceMessageID, now)); err != nil {
 			return nil, fmt.Errorf("关系入图失败: %w", err)
 		}
 		emitIngest("conflict_replace", 0)
 	} else {
 		// REQ-229① 同名异义提醒：图内已有同名实体且定义相似度低 → 候选注记待人工（不阻断）
 		s.disambiguationCheck(ctx, ontID, c)
-		if err := s.graphUpdate(ctx, ontID, InsertNodeTriples(ontID, c.ID, c.Kind, c.Name, c.Definition, c.TimeScope, c.Confidence, c.SourceMessageID, now)); err != nil {
+		if err := s.graphUpdate(ctx, ontID, InsertNodeTriples(ontID, c.ID, c.Kind, cnSrc.Canonical, c.Definition, c.TimeScope, c.Confidence, c.SourceMessageID, now)); err != nil {
 			return nil, fmt.Errorf("入图失败: %w", err)
 		}
 		emitIngest("insert", 0)
@@ -995,6 +1056,7 @@ type GraphNode struct {
 }
 
 type GraphEdge struct {
+	EdgeURI   string `json:"edge_uri,omitempty"` // REQ-286 C1：关系表行操作定位（删除）
 	Source    string `json:"source"`
 	Target    string `json:"target"`
 	Rel       string `json:"rel"`
@@ -1045,7 +1107,7 @@ func (s *Service) Graph(ctx context.Context, agentID string) (map[string]any, er
 		}
 	}
 	edges := []GraphEdge{}
-	raw, err = s.Plans.Query(ctx, base, SelectEdges(ontID))
+	raw, err = s.Plans.Query(ctx, base, SelectRelationEdges(ontID)) // REQ-286：含 edge 列（关系表行操作）
 	if err == nil {
 		var res struct {
 			Results struct {
@@ -1060,7 +1122,7 @@ func (s *Service) Graph(ctx context.Context, agentID string) (map[string]any, er
 				if v, ok := b["count"]; ok && v.Value != "" {
 					fmt.Sscanf(v.Value, "%d", &cnt)
 				}
-				edges = append(edges, GraphEdge{Source: b["src"].Value, Target: b["dst"].Value, Rel: b["rel"].Value, CreatedAt: b["at"].Value, ConfirmCount: cnt})
+				edges = append(edges, GraphEdge{EdgeURI: b["edge"].Value, Source: b["src"].Value, Target: b["dst"].Value, Rel: b["rel"].Value, CreatedAt: b["at"].Value, ConfirmCount: cnt})
 			}
 		}
 	}

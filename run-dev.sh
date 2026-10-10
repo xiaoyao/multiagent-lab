@@ -78,6 +78,18 @@ echo "[run-dev] 构建本体侧服务..."
 (cd ontology-service && go build -o ../data/bin/ontologyd ./cmd/ontologyd)
 (cd runtime-manager && go build -o ../data/bin/runtimed ./cmd/runtimed)
 
+# REQ-286 顺带：sidecar 显式选可用 python3（macOS xcrun 损坏时 /usr/bin/python3 shim 不可用，
+# 需含 rdflib 的解释器——优先 PATH 中的 python3，其次 Homebrew 常见落点；已设 SIDECAR_PYTHON 则尊重）
+if [ -z "${SIDECAR_PYTHON:-}" ]; then
+  for _py in python3 /usr/local/bin/python3.12 /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3.10; do
+    if command -v "$_py" >/dev/null 2>&1 && "$_py" -c "import rdflib" >/dev/null 2>&1; then
+      SIDECAR_PYTHON="$(command -v "$_py")"
+      export SIDECAR_PYTHON
+      echo "[run-dev] sidecar python: $SIDECAR_PYTHON"
+      break
+    fi
+  done
+fi
 echo "[run-dev] 启动 ontology-service: http://localhost:8091"
 ADDR=":8091" DB_PATH=data/ontology.db MIGRATIONS_DIR=ontology-service/migrations \
   SIDECAR_SCRIPT="$PWD/tools/rdf-sidecar/sidecar.py" \

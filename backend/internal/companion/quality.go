@@ -1,0 +1,540 @@
+package companion
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/chat"
+	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/kb"
+	"github.com/xiaoyao/eino-multiagent-lab/backend/internal/store"
+)
+
+// ---------------------------------------------------------------------------
+// REQ-286/M91 伴生图质量三维度：关系密度（A1 prompt/A2 挖掘补抽/A3 属类规则/A4 前端提示）、
+// 一致性质量（B1 label 规范化/B3 bot:alias 别名/B2 入图向量归并/B4 人工合并）、
+// 可治理性（C1 内容清单行级编辑）。本文件承载归并解析/规范化/挖掘/编辑的服务面；
+// SPARQL 原语在 sparql.go（AddAlias/SelectAliasOwner/RenameEntity/DeleteEntity 等）。
+// ---------------------------------------------------------------------------
+
+// genusPattern A3 属类模式（零 LLM）：定义含「是（一）种/属于」类属陈述 → 低置信上下位关系建议。
+var genusPattern = regexp.MustCompile(`^(?:[^，。；]{0,60}?)是(?:一[种个类]|[种个类])?(.+?)[。；]?$`)
+
+// NormalizeLabel B1：label 规范化——返回（规范名, 变体别名列表）。
+// 规则：trim → 全角空格转半角 → 连续空白折叠 → 括号备注提取（中英文括号，备注内容转别名）。
+// 不做 ASCII 大小写改写（「K8s」等混排名保留原样）；大小写折叠只在 normalizeKey 比对层。
+func NormalizeLabel(label string) (string, []string) {
+	s := strings.TrimSpace(label)
+	s = strings.ReplaceAll(s, "\u3000", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	var aliases []string
+	main := s
+	for {
+		runes := []rune(main)
+		openIdx := -1
+		closeIdx := -1
+		for i := len(runes) - 1; i >= 0; i-- {
+			if runes[i] == ')' || runes[i] == '）' {
+				closeIdx = i
+				// 找与之配对的开括号（就近）
+				for j := i - 1; j >= 0; j-- {
+					if runes[j] == '(' || runes[j] == '（' {
+						openIdx = j
+						break
+					}
+				}
+				break
+			}
+		}
+		if openIdx < 0 || closeIdx <= openIdx {
+			break
+		}
+		note := strings.TrimSpace(string(runes[openIdx+1 : closeIdx]))
+		main = strings.TrimSpace(string(runes[:openIdx]) + string(runes[closeIdx+1:]))
+		if note != "" && note != main {
+			aliases = append(aliases, note)
+		}
+	}
+	if main == "" {
+		main = s
+	}
+	return main, aliases
+}
+
+// normalizeKey B1 比对键：ASCII 小写折叠+空白/全角归一（不做 CJK 折叠）——
+// 「POD」「Pod」「pod」同键；「K8s」与「k8s」同键。
+func normalizeKey(s string) string {
+	main, _ := NormalizeLabel(s)
+	var b strings.Builder
+	for _, r := range main {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 'a' - 'A')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// resolvedNode 归并解析结果：canonical=入图规范名（已有实体标签或规范化新名），
+// aliases=需挂接的别名（候选原始名/括号备注等 ≠ canonical 的变体），mergedFrom=非空时表示
+// 并入已有实体（B1 key 命中 / B2 向量相似）。
+type resolvedNode struct {
+	Canonical  string
+	Aliases    []string
+	MergedFrom string
+}
+
+// ResolveNode B1+B2：候选标签 → 入图规范名解析。
+// ① normalizeKey 与图内已有实体标签比对（确定性）；② 未命中走向量归并（≥0.8 保守阈值，
+// embedding 未配置/失败静默降级）；③ 均未命中 = 规范化新名 + 括号备注转别名。
+func (s *Service) ResolveNode(ctx context.Context, ontID, label string) (resolvedNode, error) {
+	main, aliases := NormalizeLabel(label)
+	res := resolvedNode{Canonical: main, Aliases: aliases}
+	labels := s.knownEntityLabels(ctx, ontID)
+	if len(labels) == 0 {
+		return res, nil
+	}
+	byKey := map[string]string{}
+	for _, l := range labels {
+		if l == "" {
+			continue
+		}
+		byKey[normalizeKey(l)] = l
+	}
+	// ① 确定性 key 命中（含候选别名命中——「Pod（容器组）」备注恰为已有实体名）
+	for _, cand := range append([]string{main}, res.Aliases...) {
+		if owner, ok := byKey[normalizeKey(cand)]; ok {
+			res.Canonical = owner
+			res.MergedFrom = label
+			if !strings.EqualFold(owner, cand) && cand != owner {
+				res.Aliases = append(res.Aliases, cand)
+			}
+			return res, nil
+		}
+	}
+	// ② 向量归并（B2；余弦阈值 0.8 保守——宁可少并不可错并）
+	if s.Box != nil {
+		emb := &kb.Embedder{Store: s.Store, Box: s.Box}
+		if inVec, err := emb.EmbedOne(ctx, main); err == nil && len(inVec) > 0 {
+			labelVecs, lerr := s.labelVectors(ctx, ontID, labels, emb)
+			if lerr == nil {
+				best, bestSim := "", 0.0
+				for l, v := range labelVecs {
+					if sim := cosineSim(inVec, v); sim > bestSim {
+						best, bestSim = l, sim
+					}
+				}
+				if best != "" && bestSim >= 0.8 {
+					res.Canonical = best
+					res.MergedFrom = label
+					if main != best {
+						res.Aliases = append(res.Aliases, main)
+					}
+					res.Aliases = append(res.Aliases, aliases...)
+					return res, nil
+				}
+			}
+		} else if err != nil {
+			log.Printf("[companion] B2 向量归并不可用（降级 key 比对）: %v", err)
+		}
+	}
+	return res, nil
+}
+
+// attachAliases B3：别名挂接（bot:alias 三元组；失败仅日志不阻断入图）。
+func (s *Service) attachAliases(ctx context.Context, ontID, canonical string, aliases []string) {
+	for _, a := range aliases {
+		a = strings.TrimSpace(a)
+		if a == "" || a == canonical || normalizeKey(a) == normalizeKey(canonical) {
+			continue
+		}
+		if err := s.graphUpdate(ctx, ontID, AddAlias(ontID, canonical, a)); err != nil {
+			log.Printf("[companion] 别名挂接失败（%s → %s）: %v", a, canonical, err)
+		}
+	}
+}
+
+// ScanGenusCandidates A3 属类模式规则（零 LLM）：概念定义含「…是（一）种…」类属陈述
+// → 追加低置信「属于」关系候选（target=类属对象文本，薄建端点既有机制承接）。
+// 产出固定 note 标注「模式规则建议」，confidence 0.35（宁缺毋滥口径下仅作提醒）。
+func ScanGenusCandidates(cands []*store.CompanionCandidate) []*store.CompanionCandidate {
+	var out []*store.CompanionCandidate
+	seen := map[string]bool{}
+	for _, c := range cands {
+		if c.Kind != "concept" {
+			continue
+		}
+		m := genusPattern.FindStringSubmatch(strings.TrimSpace(c.Definition))
+		if m == nil {
+			continue
+		}
+		genus := strings.TrimSpace(m[1])
+		if genus == "" || normalizeKey(genus) == normalizeKey(c.Name) {
+			continue
+		}
+		key := normalizeKey(c.Name) + "|" + normalizeKey(genus)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, &store.CompanionCandidate{
+			Kind: "relation", Name: c.Name, RelName: "属于", RelTarget: truncate(genus, 120),
+			Definition: "类属关系（模式规则建议）：" + truncate(c.Definition, 160),
+			Confidence: 0.35, ConversationID: c.ConversationID, AgentID: c.AgentID,
+			SourceMessageID: c.SourceMessageID, SourceExcerpt: truncate(c.Definition, 120),
+			Status: "pending", Note: "模式规则建议（A3）：定义含类属陈述",
+		})
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// A2 关系挖掘补抽轮：对图内已有实体做 LLM 关系补全——抽取时漏掉的关系事后可补。
+// 同步单次 LLM 调用（实体 ≤40，本体级单飞锁互斥）；产出 relation 候选进待确认流。
+// ---------------------------------------------------------------------------
+
+// mineSchema 关系挖掘输出契约（与抽取 relations 同形）。
+const mineSchema = `{
+  "type": "object",
+  "properties": {
+    "relations": {"type": "array", "items": {"type": "object", "properties": {
+      "rel_name": {"type": "string"}, "source": {"type": "string"}, "target": {"type": "string"},
+      "definition": {"type": "string"}, "confidence": {"type": "number"}},
+      "required": ["rel_name", "source", "target"]}}
+  },
+  "required": ["relations"]
+}`
+
+// mineOut 关系挖掘输出。
+type mineOut struct {
+	Relations []struct {
+		RelName    string  `json:"rel_name"`
+		Source     string  `json:"source"`
+		Target     string  `json:"target"`
+		Definition string  `json:"definition"`
+		Confidence float64 `json:"confidence"`
+	} `json:"relations"`
+}
+
+// mineRelationsPrompt A2：关系挖掘提示词——实体清单（label：definition）+ 关系类型清单
+//（A1 同源）+ 硬性标准（端点必须引用清单中的名称/禁自指）。无实体返回空串（调用方拦截）。
+func mineRelationsPrompt(entities []GraphNode) string {
+	var b strings.Builder
+	b.WriteString("你是本体关系挖掘助手。以下是伴生本体图中已沉淀的实体清单（label：定义），")
+	b.WriteString("请基于领域常识与它们的定义，挖掘实体之间「值得沉淀的语义关系」。\n")
+	b.WriteString("关系类型参考（不限于）：上下位（属于/是一种）、组成、依赖、引发、适用于、前置、对比、协同。\n")
+	b.WriteString("要求：\n")
+	b.WriteString("1. relations 的 source/target 必须逐字引用清单中已有实体的 label；禁止自指；\n")
+	b.WriteString("2. 只输出有实质语义依据的关系（定义可互证或领域常识强支持），宁缺毋滥；\n")
+	b.WriteString("3. rel_name 用动名词短语；definition 一句话说明依据；confidence 0~1。\n")
+	b.WriteString("只输出 JSON。实体清单：\n")
+	for _, n := range entities {
+		if n.Kind == "Relation" {
+			continue
+		}
+		if n.Definition != "" {
+			fmt.Fprintf(&b, "- %s：%s\n", n.Label, truncate(n.Definition, 120))
+		} else {
+			fmt.Fprintf(&b, "- %s\n", n.Label)
+		}
+	}
+	return b.String()
+}
+
+// MineRelations A2：关系挖掘补抽（本体视角——产出 relation 候选归属该本体首个绑定 agent；
+// 无绑定 agent 时报错提示先绑定）。同步执行（单次 LLM 调用），调用方负责本体级互斥。
+// 返回新增候选数。
+func (s *Service) MineRelations(ctx context.Context, ontID string) (int, error) {
+	agents, err := s.Store.ListAgentsByCompanionOntology(ontID)
+	if err != nil {
+		return 0, err
+	}
+	if len(agents) == 0 {
+		return 0, &store.HTTPError{Status: 400, Msg: "该本体暂无绑定智能体——请先在智能体侧板绑定伴生本体"}
+	}
+	agent := agents[0]
+	connID := extractConnID(agent)
+	// 图内实体清单（label+definition；SelectNodes 已含别名但主 label 唯一）
+	raw, err := s.graphQuery(ctx, ontID, SelectNodes(ontID))
+	if err != nil {
+		return 0, err
+	}
+	nodes := parseGraphNodes(raw)
+	_ = nodes
+	entities := collectEntityList(raw)
+	for _, n := range nodes {
+		if n.Kind == "Relation" {
+			continue
+		}
+		entities = append(entities, n)
+	}
+	if len(entities) < 2 {
+		return 0, &store.HTTPError{Status: 400, Msg: "图内实体不足 2 个——先通过对话沉淀更多概念"}
+	}
+	prompt := mineRelationsPrompt(entities)
+	res, err := chat.GenerateStructured(ctx, s.Store, s.Box, connID, prompt, mineSchema)
+	if err != nil {
+		return 0, fmt.Errorf("关系挖掘 LLM 调用失败: %w", err)
+	}
+	var out mineOut
+	if err := json.Unmarshal(res.DraftJSON, &out); err != nil {
+		return 0, fmt.Errorf("关系挖掘输出解析失败: %w", err)
+	}
+	known := s.knownEntityLabels(ctx, ontID)
+	cands := pruneRelationsOnly(mineToCandidates(ontID, agent.ID, &out, known))
+	if err := s.Store.CreateCompanionCandidates(cands); err != nil {
+		return 0, err
+	}
+	s.audit("companion_mine_relations", ontID, fmt.Sprintf("伴生关系挖掘：产出 %d 条候选", len(cands)), map[string]any{"ontology_id": ontID, "entities": len(entities)})
+	return len(cands), nil
+}
+
+// mineToCandidates 挖掘输出 → relation 候选（端点 key 对齐已有实体规范名，未知名薄建既有机制承接）。
+func mineToCandidates(ontID, agentID string, out *mineOut, known []string) []*store.CompanionCandidate {
+	byKey := map[string]string{}
+	for _, l := range known {
+		byKey[normalizeKey(l)] = l
+	}
+	canonical := func(label string) string {
+		if owner, ok := byKey[normalizeKey(label)]; ok {
+			return owner
+		}
+		main, _ := NormalizeLabel(label)
+		return main
+	}
+	var cands []*store.CompanionCandidate
+	for _, r := range out.Relations {
+		if strings.TrimSpace(r.RelName) == "" || strings.TrimSpace(r.Source) == "" || strings.TrimSpace(r.Target) == "" {
+			continue
+		}
+		if normalizeKey(r.Source) == normalizeKey(r.Target) {
+			continue // 自指
+		}
+		cands = append(cands, &store.CompanionCandidate{
+			Kind: "relation", Name: truncate(canonical(r.Source), 120), RelName: truncate(r.RelName, 120),
+			RelTarget: truncate(canonical(r.Target), 120), Definition: truncate(r.Definition, 500),
+			Confidence: r.Confidence, ConversationID: "", AgentID: agentID,
+			SourceExcerpt: "关系挖掘补全（REQ-286 A2）", Status: "pending",
+		})
+	}
+	return cands
+}
+
+// pruneRelationsOnly 挖掘批自检：批内去重（同主体+关系名+客体）与端点相同剔除（A2 复用 REQ-283 精神）。
+func pruneRelationsOnly(cands []*store.CompanionCandidate) []*store.CompanionCandidate {
+	var out []*store.CompanionCandidate
+	seen := map[string]bool{}
+	for _, c := range cands {
+		key := normalizeKey(c.Name) + "|" + normalizeKey(c.RelName) + "|" + normalizeKey(c.RelTarget)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, c)
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// C1 内容清单行级编辑 + B4 人工合并（本体视角 API；编辑动作落 onto_decision 审计+快照刷新）。
+// ---------------------------------------------------------------------------
+
+// snapshotAfterEdit 编辑后快照同步刷新（失败仅日志）。
+func (s *Service) snapshotAfterEdit(ctx context.Context, ontID string) {
+	if base, err := s.Plans.EnsureHostPlan(ctx, ontID); err == nil {
+		s.snapshotRefresh(ctx, ontID, base)
+	} else {
+		log.Printf("[companion] 编辑后快照刷新失败（%s）: %v", ontID, err)
+	}
+}
+
+// EditEntity C1：实体编辑——newLabel 非空=重命名（迁移式：新 URI 复制+边重定向+别名带旧名）；
+// newDefinition 非空=改定义。二者可同批。
+func (s *Service) EditEntity(ctx context.Context, ontID, label, newLabel, newDefinition string) error {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return &store.HTTPError{Status: 400, Msg: "label 必填"}
+	}
+	// 改定义：先删后插（SPARQL Update 复合）
+	if d := strings.TrimSpace(newDefinition); d != "" {
+		e := EntityURI(label)
+		g := GraphURI(ontID)
+		if err := s.graphUpdate(ctx, ontID, fmt.Sprintf(`PREFIX bot: <%s>
+DELETE { GRAPH <%s> { <%s> bot:definition ?any } }
+INSERT { GRAPH <%s> { <%s> bot:definition %q } }
+WHERE { GRAPH <%s> { OPTIONAL { <%s> bot:definition ?any } } }`, BotNS, g, e, g, e, turtleEscape(d), g, e)); err != nil {
+			return err
+		}
+	}
+	if nl := strings.TrimSpace(newLabel); nl != "" && nl != label {
+		// 大小写/空白差异允许（POD→Pod 正是典型规范化诉求）——迁移后旧名转别名
+		if err := s.runGraphSteps(ctx, ontID, RenameEntity(ontID, label, nl)); err != nil {
+			return fmt.Errorf("重命名失败: %w", err)
+		}
+		s.invalidateLabelCache(ontID)
+		s.audit("companion_edit_entity", ontID, fmt.Sprintf("伴生实体重命名：%s → %s", label, nl), map[string]any{"ontology_id": ontID, "old_label_as_alias": label})
+	} else {
+		s.audit("companion_edit_entity", ontID, fmt.Sprintf("伴生实体改定义：%s", label), map[string]any{"ontology_id": ontID})
+	}
+	s.snapshotAfterEdit(ctx, ontID)
+	return nil
+}
+
+// DeleteEntity C1：删除实体（主体三元组+关联边整边删除；快照刷新）。
+func (s *Service) DeleteEntity(ctx context.Context, ontID, label string) error {
+	if err := s.runGraphSteps(ctx, ontID, DeleteEntity(ontID, strings.TrimSpace(label))); err != nil {
+		return err
+	}
+	s.invalidateLabelCache(ontID)
+	s.audit("companion_delete_entity", ontID, fmt.Sprintf("伴生实体删除：%s", label), map[string]any{"ontology_id": ontID})
+	s.snapshotAfterEdit(ctx, ontID)
+	return nil
+}
+
+// AddRelationManual C1：补关系（选两端实体+关系名→INSERT 边；端点须为图内已有实体）。
+func (s *Service) AddRelationManual(ctx context.Context, ontID, source, relName, target, definition string) error {
+	source, relName, target = strings.TrimSpace(source), strings.TrimSpace(relName), strings.TrimSpace(target)
+	if source == "" || relName == "" || target == "" {
+		return &store.HTTPError{Status: 400, Msg: "source/rel_name/target 必填"}
+	}
+	if normalizeKey(source) == normalizeKey(target) {
+		return &store.HTTPError{Status: 400, Msg: "禁止自指关系"}
+	}
+	// 端点校验：须为图内已有实体（含别名解析）
+	known := s.knownEntityLabels(ctx, ontID)
+	match := func(name string) (string, bool) {
+		for _, l := range known {
+			if l == name || normalizeKey(l) == normalizeKey(name) {
+				return l, true
+			}
+		}
+		return "", false
+	}
+	src, ok1 := match(source)
+	dst, ok2 := match(target)
+	if !ok1 || !ok2 {
+		return &store.HTTPError{Status: 400, Msg: "端点须为图内已有实体（" + source + " / " + target + " 未找到）"}
+	}
+	candID := "manual-" + store.NewID()
+	if err := s.graphUpdate(ctx, ontID, InsertRelationTriples(ontID, candID, relName, src, dst, definition, 1.0, "", time.Now())); err != nil {
+		return err
+	}
+	s.invalidateLabelCache(ontID)
+	s.audit("companion_add_relation", ontID, fmt.Sprintf("伴生补关系：%s —%s→ %s", src, relName, dst), map[string]any{"ontology_id": ontID, "edge": EdgeURI(candID)})
+	s.snapshotAfterEdit(ctx, ontID)
+	return nil
+}
+
+// DeleteRelationManual C1：删关系（按边 URI；存在性校验）。
+func (s *Service) DeleteRelationManual(ctx context.Context, ontID, edgeURI string) error {
+	raw, err := s.graphQuery(ctx, ontID, SelectEdgeByURI(ontID, edgeURI))
+	if err != nil {
+		return err
+	}
+	var probe struct {
+		Results struct {
+			Bindings []map[string]any `json:"bindings"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	if len(probe.Results.Bindings) == 0 {
+		return &store.HTTPError{Status: 404, Msg: "关系边不存在或已失效"}
+	}
+	if err := s.graphUpdate(ctx, ontID, DeleteEdgeByURI(ontID, edgeURI)); err != nil {
+		return err
+	}
+	s.audit("companion_delete_relation", ontID, "伴生删除关系边", map[string]any{"ontology_id": ontID, "edge": edgeURI})
+	s.snapshotAfterEdit(ctx, ontID)
+	return nil
+}
+
+// MergeEntity B4：人工合并——from 并入 to（from 变体挂 alias+出入边重定向+from 主体清理）。
+// 复用 RenameEntity 迁移语义（重命名即「并入新主名」）：from 的边全部指到 to，from 消失，
+// to 获得 from 名作为别名。to 为图内已有实体（必须存在——校验 by known labels）。
+func (s *Service) MergeEntity(ctx context.Context, ontID, fromLabel, toLabel string) error {
+	fromLabel, toLabel = strings.TrimSpace(fromLabel), strings.TrimSpace(toLabel)
+	if fromLabel == "" || toLabel == "" {
+		return &store.HTTPError{Status: 400, Msg: "from/to 必填"}
+	}
+	if normalizeKey(fromLabel) == normalizeKey(toLabel) {
+		return &store.HTTPError{Status: 400, Msg: "不可合并同名实体"}
+	}
+	known := s.knownEntityLabels(ctx, ontID)
+	toExists := false
+	fromExists := false
+	for _, l := range known {
+		if normalizeKey(l) == normalizeKey(toLabel) {
+			toExists = true
+			toLabel = l
+		}
+		if normalizeKey(l) == normalizeKey(fromLabel) {
+			fromExists = true
+			fromLabel = l
+		}
+	}
+	if !toExists {
+		return &store.HTTPError{Status: 400, Msg: "目标实体不存在（" + toLabel + "）"}
+	}
+	if !fromExists {
+		return &store.HTTPError{Status: 400, Msg: "来源实体不存在（" + fromLabel + "）"}
+	}
+	if err := s.runGraphSteps(ctx, ontID, RenameEntity(ontID, fromLabel, toLabel)); err != nil {
+		return fmt.Errorf("合并失败: %w", err)
+	}
+	s.invalidateLabelCache(ontID)
+	s.audit("companion_merge_entity", ontID, fmt.Sprintf("伴生实体合并：%s → %s", fromLabel, toLabel), map[string]any{"ontology_id": ontID})
+	s.snapshotAfterEdit(ctx, ontID)
+	return nil
+}
+
+// parseGraphNodes SelectNodes SPARQL JSON → GraphNode 切片（挖掘/编辑共用）。
+func parseGraphNodes(raw []byte) []GraphNode {
+	var res struct {
+		Results struct {
+			Bindings []map[string]struct {
+				Value string `json:"value"`
+			} `json:"bindings"`
+		} `json:"results"`
+	}
+	if json.Unmarshal(raw, &res) != nil {
+		return nil
+	}
+	out := make([]GraphNode, 0, len(res.Results.Bindings))
+	for _, b := range res.Results.Bindings {
+		kind := strings.TrimPrefix(b["kind"].Value, BotNS)
+		conf := 0.0
+		fmt.Sscanf(b["conf"].Value, "%f", &conf)
+		out = append(out, GraphNode{Kind: kind, Label: b["label"].Value, Definition: b["def"].Value, Confidence: conf, TimeScope: b["tscope"].Value, CreatedAt: b["at"].Value})
+	}
+	return out
+}
+
+// collectEntityList 从 SelectNodes 原始响应提取实体（概念/事件）label+definition 清单。
+func collectEntityList(raw []byte) []GraphNode {
+	nodes := parseGraphNodes(raw)
+	out := make([]GraphNode, 0, len(nodes))
+	for _, n := range nodes {
+		if n.Kind == "Relation" {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// runGraphSteps REQ-286：顺序执行多步图更新（每步独立 Update——oxigraph `;` 串联多操作
+// 执行不完整的实证规避）；任一步失败即返回（后续步骤幂等可重试）。
+func (s *Service) runGraphSteps(ctx context.Context, ontID string, steps []string) error {
+	for i, step := range steps {
+		if err := s.graphUpdate(ctx, ontID, step); err != nil {
+			return fmt.Errorf("步骤 %d/%d 失败: %w", i+1, len(steps), err)
+		}
+	}
+	return nil
+}

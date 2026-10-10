@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Input, Popconfirm, Result, Space, Splitter, Tag, Tooltip, Typography } from 'antd'
 import { BranchesOutlined, CloudDownloadOutlined, CloudUploadOutlined, DeleteOutlined, EditOutlined, ImportOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
 import { api, ApiError } from '../../api/client'
@@ -153,6 +153,7 @@ export default function AssetsPage() {
 
   // REQ-285②：伴生型详情头数据状态（伴生图计数/绑定者/待确认候选）——派生与加载在 active 声明后
   const [compGraph, setCompGraph] = useState<CompanionGraph | null>(null)
+  const reloadCompGraphRef = useRef<() => void>(() => {}) // REQ-286 C1：编辑后重拉伴生图
   const [compAgents, setCompAgents] = useState<Agent[]>([])
   const [compPending, setCompPending] = useState(0)
   const reloadProfiles = () => {
@@ -231,19 +232,22 @@ export default function AssetsPage() {
       return
     }
     let alive = true
-    companionApi
-      .listOntologyAgents(activeId)
-      .then(async (ls) => {
-        if (!alive) return
-        setCompAgents(ls ?? [])
-        if (ls && ls.length > 0) {
-          try {
-            const g = await companionApi.graph(ls[0].id)
-            if (alive) setCompGraph(g)
-          } catch { /* 引擎不可达：统计行诚实按 0 计，沉淀总览分区自会透出 plan_error */ }
-        }
-      })
-      .catch(() => {})
+    reloadCompGraphRef.current = () => {
+      companionApi
+        .listOntologyAgents(activeId)
+        .then(async (ls) => {
+          if (!alive) return
+          setCompAgents(ls ?? [])
+          if (ls && ls.length > 0) {
+            try {
+              const g = await companionApi.graph(ls[0].id)
+              if (alive) setCompGraph(g)
+            } catch { /* 引擎不可达：统计行诚实按 0 计 */ }
+          }
+        })
+        .catch(() => {})
+    }
+    reloadCompGraphRef.current()
     companionApi
       .listCandidatesByOntology(activeId, 'pending')
       .then((ls) => {
@@ -723,7 +727,7 @@ export default function AssetsPage() {
                   // REQ-285①：伴生型「沉淀总览」直挂伴生成长图（spec 2D/3D/WebVOWL 对空 spec 无意义）
                   ? <OntologyCompanionGraph key={active.id} ontologyId={active.id} />
                   : <VizTabs spec={spec} ontologyId={active.id} />)}
-                {secKey === 'companion-content' && <CompanionContentPane graph={compGraph} />}
+                {secKey === 'companion-content' && <CompanionContentPane graph={compGraph} ontologyId={active.id} onChanged={() => reloadCompGraphRef.current()} />}
                 {secKey === 'companion-export' && <CompanionExportPane key={active.id} ontologyId={active.id} />}
                 {secKey === 'evolution' && <EvolutionPane key={active.id} ontologyId={active.id} />}
                 {secKey === 'companion' && <OntologyCompanionPane key={active.id} ontologyId={active.id} />}
