@@ -4,7 +4,7 @@ import { BranchesOutlined, CloudDownloadOutlined, CloudUploadOutlined, DeleteOut
 import { api, ApiError } from '../../api/client'
 import type { QualityReport } from '../../api/client'
 import { companionApi } from '../../api/companion'
-import type { Ontology, OntologyReferences, RuntimeProfile, Spec } from '../../api/types'
+import type { Agent, Ontology, OntologyReferences, RuntimeProfile, Spec } from '../../api/types'
 import QualityRadar, { radarDimsOf } from '../../components/QualityRadar'
 import { expressivityOf } from './shared/expressivity'
 import { useUI } from '../../store/ui'
@@ -16,6 +16,10 @@ import SpecEditorPane from './components/assets/SpecEditorPane'
 import { ArtifactsPane, ExportPane, ValidatePane } from './components/assets/AssetPanes'
 import { RenameModal, VizTabs } from './components/assets/AssetExtras'
 import OntologyCompanionPane from './components/companion/OntologyCompanionPane'
+import OntologyCompanionGraph from './components/companion/OntologyCompanionGraph'
+import CompanionContentPane from './components/companion/CompanionContentPane'
+import CompanionExportPane from './components/companion/CompanionExportPane'
+import type { CompanionGraph } from '../../api/companion'
 import EvolutionPane from './components/assets/EvolutionPane'
 import RelationTypesPane from './components/assets/RelationTypesPane'
 import AxiomsPane from './components/assets/AxiomsPane'
@@ -43,6 +47,22 @@ import Maximizeable from '../../components/Maximizeable'
 
 /** 详情工作区分区（三簇；57 号 F1 分组口径）。REQ-240 优化④：伴生分区仅伴生型本体注入。 */
 function sectionGroups(isCompanion: boolean): { title: string; items: { key: string; label: string }[] }[] {
+  // REQ-284①：详情模板分型——伴生型（对话生长容器）切换伴生语义分组，spec 系分区全部不出现
+  // （空 spec 的 Spec 编辑/校验/质量卡/版本等分区对伴生型是空壳噪声）；普通型维持 spec 中心三分组。
+  if (isCompanion) {
+    return [
+      {
+        title: '对话沉淀',
+        items: [
+          { key: 'graph', label: '沉淀总览' },
+          { key: 'companion', label: '伴生候选' },
+          { key: 'companion-content', label: '内容清单' },
+          { key: 'companion-export', label: '导出 TTL' },
+        ],
+      },
+      { title: '引用', items: [{ key: 'references', label: '被引用' }] },
+    ]
+  }
   return [
     {
       title: '内容与编辑',
@@ -68,7 +88,6 @@ function sectionGroups(isCompanion: boolean): { title: string; items: { key: str
       title: '消费与引用',
       items: [
         { key: 'graph', label: '可视化' },
-        ...(isCompanion ? [{ key: 'companion', label: '伴生候选' }] : []),
         { key: 'references', label: '被引用' },
         { key: 'artifacts', label: '产物' },
         { key: 'export', label: 'TTL 导出' },
@@ -118,6 +137,11 @@ export default function AssetsPage() {
       })
   }
 
+  // REQ-284⑤：切换本体重置分区——分型后两套模板键不相交，残留键（如 axioms）落空渲染
+  useEffect(() => {
+    setTabKey(null)
+  }, [activeId])
+
   // REQ-216⑦：伴生绑定本体清单（详情页「伴生候选」页签「对话生长」徽标判定）
   const [boundIds, setBoundIds] = useState<Set<string>>(new Set())
   const reloadBound = () => {
@@ -127,6 +151,10 @@ export default function AssetsPage() {
       .catch(() => setBoundIds(new Set()))
   }
 
+  // REQ-284②：伴生型详情头数据状态（伴生图计数/绑定者/待确认候选）——派生与加载在 active 声明后
+  const [compGraph, setCompGraph] = useState<CompanionGraph | null>(null)
+  const [compAgents, setCompAgents] = useState<Agent[]>([])
+  const [compPending, setCompPending] = useState(0)
   const reloadProfiles = () => {
     api
       .listRuntimeProfiles()
@@ -141,10 +169,17 @@ export default function AssetsPage() {
   }, [])
 
   // 选中本体 → 拉取 Spec（404 视为尚未保存，不算错误）
+  // REQ-284：伴生容器无 spec 数据面——分型后跳过 spec/质量拉取（404 控制台噪声与空跑评分一并消除）
   useEffect(() => {
     if (!activeId) {
       setSpec(null)
       setSpecErr(null)
+      return
+    }
+    if (boundIds.has(activeId)) {
+      setSpec(null)
+      setSpecErr(null)
+      setSpecLoading(false)
       return
     }
     let alive = true
@@ -180,16 +215,53 @@ export default function AssetsPage() {
     return () => {
       alive = false
     }
-  }, [activeId, specTick])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- boundIds 到位后重跑一次即被伴生守卫拦截
+  }, [activeId, specTick, boundIds])
 
   const active = useMemo(() => ontos.find((o) => o.id === activeId) ?? null, [ontos, activeId])
+
+  // REQ-284②：伴生型详情头数据加载（伴生图计数/绑定者/待确认候选）——分型模板统计行数据源；
+  // 经首个绑定 agent 解析伴生子图（多 agent 共享同一子图，任一视角等价，与成长图同口径）
+  const isCompActive = !!(active && boundIds.has(active.id))
+  useEffect(() => {
+    if (!activeId || !isCompActive) {
+      setCompGraph(null)
+      setCompAgents([])
+      setCompPending(0)
+      return
+    }
+    let alive = true
+    companionApi
+      .listOntologyAgents(activeId)
+      .then(async (ls) => {
+        if (!alive) return
+        setCompAgents(ls ?? [])
+        if (ls && ls.length > 0) {
+          try {
+            const g = await companionApi.graph(ls[0].id)
+            if (alive) setCompGraph(g)
+          } catch { /* 引擎不可达：统计行诚实按 0 计，沉淀总览分区自会透出 plan_error */ }
+        }
+      })
+      .catch(() => {})
+    companionApi
+      .listCandidatesByOntology(activeId, 'pending')
+      .then((ls) => {
+        if (alive) setCompPending(ls?.length ?? 0)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [activeId, isCompActive])
   // 切换选中本体时回落默认页签规则（REQ-230②）
   useEffect(() => {
     setTabKey(null)
   }, [activeId])
   const validation = activeId ? validations[activeId] : undefined
   // 详情分区键（REQ-230② 规则保留：伴生型本体默认打开「伴生候选」分区，其余默认 Spec 编辑）
-  const secKey = tabKey ?? (active && boundIds.has(active.id) ? 'companion' : 'spec')
+  // REQ-284⑤：伴生型默认分区=沉淀总览（REQ-230②「默认候选」口径变更——分型后总览为先）
+  const secKey = tabKey ?? (active && boundIds.has(active.id) ? 'graph' : 'spec')
 
   /** 被 N 套方案引用（只读徽标，增强正交可见性） */
   const refCount = (o: Ontology) => profiles.filter((p) => (p.ontology_ids ?? []).includes(o.id)).length
@@ -362,11 +434,30 @@ export default function AssetsPage() {
               </Tooltip>
               {/* 规模与引用元信息行（原标题行内标签迁此，标题行瘦身） */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 12, color: 'var(--c-ink-2)' }}>
-                <span>概念 {active.n_concepts ?? 0}</span>
-                <span>·</span>
-                <span>关系 {active.n_relations ?? 0}</span>
-                <span>·</span>
-                <span>实例 {active.n_instances ?? 0}</span>
+                {isCompActive ? (
+                  <>
+                    {/* REQ-284②：伴生型统计行=伴生图计数（spec 恒空，n_concepts 恒 0 是误导） */}
+                    <span>概念 {compGraph?.nodes.filter((n) => n.kind === 'Concept').length ?? 0}</span>
+                    <span>·</span>
+                    <span>事件 {compGraph?.nodes.filter((n) => n.kind === 'Event').length ?? 0}</span>
+                    <span>·</span>
+                    <span>关系 {compGraph?.edges.length ?? 0}</span>
+                    <span>·</span>
+                    <span>待确认候选 {compPending}</span>
+                    <span>·</span>
+                    <Tooltip title={compAgents.length ? `沉淀者（绑定该容器的智能体）：${compAgents.map((a) => a.name).join('、')}` : '无智能体绑定'}>
+                      <span style={{ cursor: 'default' }}>沉淀者 {compAgents.length}</span>
+                    </Tooltip>
+                  </>
+                ) : (
+                  <>
+                    <span>概念 {active.n_concepts ?? 0}</span>
+                    <span>·</span>
+                    <span>关系 {active.n_relations ?? 0}</span>
+                    <span>·</span>
+                    <span>实例 {active.n_instances ?? 0}</span>
+                  </>
+                )}
                 <span>·</span>
                 <Tooltip title="被 N 套运行方案引用（只读；启停操作在「本体运行」栏）">
                   <span style={{ cursor: 'default' }}>被 {refCount(active)} 套方案引用</span>
@@ -376,7 +467,7 @@ export default function AssetsPage() {
             {/* REQ-264 follow-up：右列=动作按钮在上（与本体名同行顶对齐）+ 能力雷达在按钮下方；
                 描述/元信息在左列，天然位于雷达左侧 */}
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8, flexShrink: 0, alignSelf: 'flex-start' }}>
-              {qualityCache[active.id] && (
+              {!isCompActive && qualityCache[active.id] && (
                 <Tooltip
                   title={
                     <span>
@@ -390,8 +481,8 @@ export default function AssetsPage() {
                 </Tooltip>
               )}
               <Space wrap style={{ order: -1 }}>
-              {/* REQ-239/M65：发布（命名快照终态）/ 撤回发布（回 draft） */}
-              {active.status === 'published' ? (
+              {/* REQ-239/M65：发布（命名快照终态）/ 撤回发布（回 draft）；REQ-284②：伴生容器恒 draft 不发布 */}
+              {!isCompActive && (active.status === 'published' ? (
                 <Popconfirm
                   icon={null}
                   title="撤回发布？"
@@ -444,7 +535,8 @@ export default function AssetsPage() {
                 >
                   <Button type="primary" ghost icon={<CloudUploadOutlined />}>发布</Button>
                 </Popconfirm>
-              )}
+              ))}
+              {!isCompActive && (
               <Popconfirm
                 icon={null}
                 title="Fork 为新本体"
@@ -473,12 +565,18 @@ export default function AssetsPage() {
               >
                 <Button icon={<BranchesOutlined />}>Fork 本体</Button>
               </Popconfirm>
+              )}
+              {/* REQ-284②：重命名/导入合并对伴生容器无意义（spec 恒空壳）——普通型专属 */}
+              {!isCompActive && (
               <Button icon={<EditOutlined />} onClick={() => setRenameOpen(true)}>
                 重命名
               </Button>
+              )}
+              {!isCompActive && (
               <Button icon={<ImportOutlined />} onClick={() => setMergeOpen(true)}>
                 导入合并
               </Button>
+              )}
               <Popconfirm
                 title={`删除本体「${active.name}」？`}
                 description={
@@ -621,7 +719,12 @@ export default function AssetsPage() {
                 )}
                 {secKey === 'versions' && <SourceView ontologyId={active.id} currentVersion={active.version} spec={spec} onRestored={refreshAfterSave} />}
                 {secKey === 'artifacts' && <ArtifactsPane ontologyId={active.id} />}
-                {secKey === 'graph' && <VizTabs spec={spec} ontologyId={active.id} isCompanion={boundIds.has(active.id)} />}
+                {secKey === 'graph' && (isCompActive
+                  // REQ-284①：伴生型「沉淀总览」直挂伴生成长图（spec 2D/3D/WebVOWL 对空 spec 无意义）
+                  ? <OntologyCompanionGraph key={active.id} ontologyId={active.id} />
+                  : <VizTabs spec={spec} ontologyId={active.id} />)}
+                {secKey === 'companion-content' && <CompanionContentPane graph={compGraph} />}
+                {secKey === 'companion-export' && <CompanionExportPane key={active.id} ontologyId={active.id} />}
                 {secKey === 'evolution' && <EvolutionPane key={active.id} ontologyId={active.id} />}
                 {secKey === 'companion' && <OntologyCompanionPane key={active.id} ontologyId={active.id} />}
                 {secKey === 'references' && <ReferencesPane key={active.id} ontologyId={active.id} />}

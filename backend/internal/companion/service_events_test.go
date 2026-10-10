@@ -573,3 +573,62 @@ func TestSnapshotBackfillOnMissing(t *testing.T) {
 		t.Fatal("读路径应已补拍快照（D 兜底）")
 	}
 }
+
+// ---- REQ-284：伴生型详情分型与资产对齐 ----
+
+// TestSPARQLBindingsToTTL TTL 序列化器：uri/literal/转义/lang/datatype 缩写/排序稳定。
+func TestSPARQLBindingsToTTL(t *testing.T) {
+	raw := []byte(`{"results":{"bindings":[
+		{"s":{"type":"uri","value":"http://eino-lab/e/pod"},"p":{"type":"uri","value":"http://www.w3.org/2000/01/rdf-schema#label"},"o":{"type":"literal","value":"Pod\"驱逐\n"}},
+		{"s":{"type":"uri","value":"http://eino-lab/e/pod"},"p":{"type":"uri","value":"http://eino-lab/ontology/thin/definition"},"o":{"type":"literal","value":"节点不足时清除并重建","xml:lang":"zh"}},
+		{"s":{"type":"uri","value":"http://eino-lab/e/pod"},"p":{"type":"uri","value":"http://www.w3.org/ns/prov#generatedAtTime"},"o":{"type":"literal","datatype":"http://www.w3.org/2001/XMLSchema#dateTime","value":"2026-10-09T00:00:00Z"}},
+		{"s":{"type":"bnode","value":"b0"},"p":{"type":"uri","value":"http://www.w3.org/1999/02/22-rdf-syntax-ns#type"},"o":{"type":"uri","value":"http://eino-lab/ontology/thin/Concept"}}
+	]}}`)
+	out, err := SPARQLBindingsToTTL(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(out)
+	for _, want := range []string{
+		"@prefix rdfs:", "@prefix bot:",
+		`<http://eino-lab/e/pod> rdfs:label "Pod\"驱逐\n"`,
+		`bot:definition "节点不足时清除并重建"@zh`,
+		`prov:generatedAtTime "2026-10-09T00:00:00Z"^^xsd:dateTime`,
+		"_:b0 rdf:type bot:Concept",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("TTL 缺 %q\n---\n%s", want, doc)
+		}
+	}
+	out2, _ := SPARQLBindingsToTTL(raw)
+	if string(out) != string(out2) {
+		t.Fatal("同图导出应字节稳定")
+	}
+}
+
+// TestExportTTLEndToEnd 端到端：确认入图 → ExportTTL 含该实体（走冒烟引擎；无 oxigraph Skip）。
+func TestExportTTLEndToEnd(t *testing.T) {
+	base := smokeBase(t)
+	t.Setenv("COMPANION_SNAPSHOT_DIR", filepath.Join(t.TempDir(), "snaps"))
+	st := openEventsStore(t)
+	if _, err := st.CreateAgent(&store.Agent{ID: "snap-ttl", Name: "ttl", CompanionOntologyID: "ont_smoke"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(st, nil, smokePlans(base))
+	cands := []*store.CompanionCandidate{
+		{AgentID: "snap-ttl", ConversationID: "c1", Kind: "concept", Name: "滚动更新", Definition: "逐批替换", Confidence: 0.9, Status: "pending"},
+	}
+	if err := st.CreateCompanionCandidates(cands); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ConfirmCandidate(context.Background(), cands[0].ID, "manual"); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := svc.ExportTTL(context.Background(), "ont_smoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), "滚动更新") {
+		t.Fatalf("导出应含已入图实体:\n%s", doc)
+	}
+}
