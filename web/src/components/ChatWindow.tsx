@@ -109,7 +109,8 @@ export function describeEvent(type: string, d: any): { text: string; err?: boole
     case 'retrieval': {
       if (d?.source === 'companion') {
         const n = Array.isArray(d?.entities) ? d.entities.length : 0
-        return { text: `🧩 伴生图召回 · ${n} 实体` }
+        // 17 号⑦术语分层：用户可见文案以「伴生本体」为主语
+        return { text: `🧩 伴生本体召回 · ${n} 实体` }
       }
       const n = Array.isArray(d?.hits) ? d.hits.length : 0
       return { text: `📚 知识召回 · ${n} 条` }
